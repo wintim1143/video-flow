@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { AspectRatio, Shot, Storyboard, StyleSpec } from "@/lib/schema";
+import type { AspectRatio, Outline, Shot, Storyboard, StyleSpec } from "@/lib/schema";
 import { ASPECT_LABEL, formatTimecode } from "@/lib/schema";
 import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown } from "@/lib/exports";
 import type { LlmConfigsResponse, LlmProfileSafe } from "@/lib/llm-types";
@@ -64,6 +64,13 @@ export default function Page() {
 
   const [loading, setLoading] = useState<"" | "style" | "shots">("");
   const [error, setError] = useState<ApiError | null>(null);
+
+  // ── 分镜流式生成进度（两段式：大纲 → 逐镜）──
+  const [outline, setOutline] = useState<Outline | null>(null);
+  const [failedShots, setFailedShots] = useState<number[]>([]);
+  const [progress, setProgress] = useState<{ phase: "" | "outline" | "shots"; done: number; total: number; last: string }>(
+    { phase: "", done: 0, total: 0, last: "" }
+  );
 
   // ── LLM profiles（脱敏，来自 /api/llm-configs）──
   const [profiles, setProfiles] = useState<LlmConfigsResponse>({ text: [], image: [], video: [] });
@@ -172,28 +179,142 @@ export default function Page() {
     }
     setLoading("shots");
     setError(null);
+    setShots(null);
+    setOutline(null);
+    setFailedShots([]);
+    setProgress({ phase: "outline", done: 0, total: shotCount, last: "正在生成分镜大纲…" });
     try {
       const res = await fetch("/api/shots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brief, aspectRatio, targetDuration, style, shotCount, profileId: textProfileId || undefined }),
       });
-      const json = await res.json();
-      if (!json.ok) {
-        setError({ code: json.code, message: json.message, detail: json.detail });
+      /* 非 SSE 的 JSON 响应 = 参数/配置类错误 */
+      const ctype = res.headers.get("content-type") ?? "";
+      if (!ctype.includes("text/event-stream")) {
+        const json = await res.json();
+        setError({ code: json.code ?? "UPSTREAM", message: json.message ?? "请求失败", detail: json.detail });
+        setProgress({ phase: "", done: 0, total: 0, last: "" });
         return;
       }
-      const sb = json.data as Storyboard;
-      setShots(sb.shots);
-      setSbMeta(sb.meta);
-      setGlobalNegative(sb.global_negative);
-      setGlobalNegativeCn(sb.global_negative ?? "");
-      setConsistencyNotes(sb.consistency_notes);
-      setTab("shots");
+
+      /* 读取 SSE 事件流 */
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("无法读取响应流");
+      const decoder = new TextDecoder();
+      let buf = "";
+      const handleEvent = (raw: string) => {
+        if (!raw.trim()) return;
+        let ev: {
+          type: string;
+          message?: string;
+          outline?: Outline;
+          shot?: Shot;
+          index?: number;
+          failedIndexes?: number[];
+          code?: string;
+          detail?: string;
+        };
+        try {
+          ev = JSON.parse(raw);
+        } catch {
+          return;
+        }
+        if (ev.type === "outline" && ev.outline) {
+          setOutline(ev.outline);
+          setShots([]);
+          const total = ev.outline.outline.length;
+          setProgress((p) => ({ ...p, phase: "shots", done: 0, total, last: "大纲完成，开始逐镜生成…" }));
+          setSbMeta({
+            title: ev.outline.meta.title,
+            aspect_ratio: ev.outline.meta.aspect_ratio || aspectRatio,
+            target_duration: ev.outline.meta.target_duration || targetDuration,
+            shots_count: total,
+          });
+          setGlobalNegative(ev.outline.global_negative);
+          setGlobalNegativeCn(ev.outline.global_negative ?? "");
+          setConsistencyNotes(ev.outline.consistency_notes);
+          setTab("shots");
+        } else if (ev.type === "shot" && ev.shot) {
+          const s = ev.shot;
+          setShots((prev) => {
+            const list = (prev ?? []).filter((x) => x.index !== s.index);
+            list.push(s);
+            list.sort((a, b) => a.index - b.index);
+            return list;
+          });
+          setProgress((p) => ({ ...p, done: p.done + 1, last: ev.message ?? `第 ${s.index} 镜完成` }));
+        } else if (ev.type === "shot_error") {
+          const idx = ev.index ?? 0;
+          setFailedShots((prev) => (prev.includes(idx) ? prev : [...prev, idx]));
+          setProgress((p) => ({ ...p, done: p.done + 1, last: ev.message ?? `第 ${idx} 镜失败` }));
+        } else if (ev.type === "trace") {
+          setProgress((p) => ({ ...p, last: ev.message ?? p.last }));
+        } else if (ev.type === "error") {
+          setError({ code: ev.code ?? "UPSTREAM", message: ev.message ?? "生成失败", detail: ev.detail });
+        } else if (ev.type === "done" && ev.failedIndexes) {
+          setFailedShots(ev.failedIndexes);
+        }
+      };
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          for (const line of chunk.split("\n")) {
+            if (line.startsWith("data: ")) handleEvent(line.slice(6));
+          }
+        }
+      }
     } catch (e) {
       setError({ code: "NETWORK", message: "请求失败，请确认 dev server 在运行", detail: String(e) });
     } finally {
       setLoading("");
+      setProgress((p) => ({ ...p, phase: "" }));
+    }
+  }
+
+  /** 失败镜定点重试：单镜调用 /api/shot，成功后替换 */
+  async function retryShot(index: number) {
+    if (!style || !outline) return;
+    setFailedShots((prev) => prev.filter((i) => i !== index));
+    setProgress({ phase: "shots", done: 0, total: 1, last: `正在重试第 ${index} 镜…` });
+    try {
+      const res = await fetch("/api/shot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          brief,
+          aspectRatio,
+          targetDuration,
+          style,
+          outline,
+          index,
+          neighbors: shots ?? [],
+          profileId: textProfileId || undefined,
+        }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        setError({ code: json.code, message: json.message, detail: json.detail });
+        setFailedShots((prev) => [...prev, index]);
+        return;
+      }
+      const s = json.data as Shot;
+      setShots((prev) => {
+        const list = (prev ?? []).filter((x) => x.index !== s.index);
+        list.push(s);
+        list.sort((a, b) => a.index - b.index);
+        return list;
+      });
+      setProgress((p) => ({ ...p, phase: "", done: 1, last: `第 ${index} 镜重试成功 · ${((json.meta?.ms ?? 0) / 1000).toFixed(1)}s` }));
+    } catch (e) {
+      setError({ code: "NETWORK", message: "重试请求失败", detail: String(e) });
+      setFailedShots((prev) => [...prev, index]);
     }
   }
 
@@ -430,6 +551,48 @@ export default function Page() {
       {/* ───────── ③ 分镜（可编辑 + 中英）───────── */}
       {tab === "shots" && storyboard && style ? (
         <div className="space-y-4">
+          {/* 生成进度 / 失败重试面板 */}
+          {progress.phase !== "" || failedShots.length ? (
+            <div className="panel p-4">
+              {progress.phase !== "" ? (
+                <>
+                  <div className="mb-2 flex items-center justify-between text-[12.5px]">
+                    <span className="font-medium">{progress.last || "生成中…"}</span>
+                    <span className="mono text-[var(--muted)]">
+                      {progress.phase === "outline" ? "大纲" : `${progress.done}/${progress.total} 镜`}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--panel-2)]">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{
+                        width: `${progress.total ? Math.min(100, (progress.done / progress.total) * 100) : 8}%`,
+                        background: "var(--accent)",
+                      }}
+                    />
+                  </div>
+                  <p className="mt-2 text-[11.5px] text-[var(--muted)]">
+                    两段式生成：先出大纲（快），再逐镜展开（每镜约 10-40s，完成一镜显示一镜，失败只重试单镜）
+                  </p>
+                </>
+              ) : null}
+              {failedShots.length ? (
+                <div className={progress.phase !== "" ? "mt-3 border-t border-[var(--border)] pt-3" : ""}>
+                  <div className="mb-2 text-[12.5px] font-medium" style={{ color: "var(--err)" }}>
+                    {failedShots.length} 镜生成失败（其余镜不受影响），可单独重试：
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {failedShots.map((i) => (
+                      <button key={i} type="button" className="btn" disabled={progress.phase !== ""} onClick={() => retryShot(i)}>
+                        重试第 {i} 镜
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="panel p-4">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-[15px] font-semibold">{storyboard.meta.title || "广告分镜脚本"}</h2>

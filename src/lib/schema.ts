@@ -34,7 +34,8 @@ export type StyleSpec = z.infer<typeof StyleSpecSchema>;
  */
 export const ShotSchema = z.object({
   index: z.coerce.number().int().min(1),
-  start: z.coerce.number().min(0),
+  /** 时间轴起点（秒）。逐镜展开时由服务端按大纲累加计算，LLM 不输出此字段（catch 兜底防 NaN） */
+  start: z.coerce.number().catch(0),
   duration: z.coerce.number().positive(),
   shot_type: z.string().catch(""),
   camera_movement: z.string().catch(""),
@@ -76,6 +77,37 @@ export const StoryboardSchema = z.object({
 });
 export type Storyboard = z.infer<typeof StoryboardSchema>;
 
+/**
+ * 分镜大纲（两段式第一步的产物）：每镜一句话规划，输出体量小、生成快。
+ * start 由服务端按 duration 累加计算，不让 LLM 算（减少算术错误）。
+ */
+export const ShotOutlineItemSchema = z.object({
+  index: z.coerce.number().int().min(1),
+  duration: z.coerce.number().positive().catch(5),
+  shot_type: z.string().catch(""),
+  scene: z.string().catch(""),
+  action: z.string().catch(""),
+  voiceover: z.string().catch(""),
+});
+export type ShotOutlineItem = z.infer<typeof ShotOutlineItemSchema>;
+
+export const OutlineSchema = z.object({
+  meta: z
+    .object({
+      title: z.string().catch(""),
+      aspect_ratio: z.string().catch("9:16"),
+      target_duration: z.coerce.number().catch(30),
+    })
+    .catch({ title: "", aspect_ratio: "9:16", target_duration: 30 }),
+  shots_count: z.coerce.number().catch(0),
+  /** 全片统一负面词（英文），大纲阶段一次产出 */
+  global_negative: z.string().catch(""),
+  /** 跨镜一致性锁定项，大纲阶段一次产出、逐镜沿用 */
+  consistency_notes: z.array(z.string()).catch([]),
+  outline: z.array(ShotOutlineItemSchema).min(1),
+});
+export type Outline = z.infer<typeof OutlineSchema>;
+
 export const StyleRequestSchema = z.object({
   brief: z.string().min(1, "请输入广告描述"),
   aspectRatio: z.string().default("9:16"),
@@ -91,6 +123,17 @@ export const ShotsRequestSchema = StyleRequestSchema.extend({
   shotCount: z.coerce.number().int().min(1).max(24).optional(),
 });
 export type ShotsRequest = z.infer<typeof ShotsRequestSchema>;
+
+/** 单镜重生成请求（/api/shot，SSE 分镜失败后的定点重试） */
+export const SingleShotRequestSchema = StyleRequestSchema.extend({
+  style: StyleSpecSchema,
+  outline: OutlineSchema,
+  /** 要重生成的镜头序号（取 outline 中对应项展开） */
+  index: z.coerce.number().int().min(1),
+  /** 已有相邻镜头（用于衔接一致性；可传空数组） */
+  neighbors: z.array(ShotSchema).default([]),
+});
+export type SingleShotRequest = z.infer<typeof SingleShotRequestSchema>;
 
 export type AspectRatio = "9:16" | "16:9" | "1:1";
 

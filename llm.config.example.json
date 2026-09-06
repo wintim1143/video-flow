@@ -3,35 +3,28 @@
     {
       "id": "terra",
       "name": "GPT-5.6 Terra（风格/分镜主力）",
-      "baseURL": "https://lanfengai.cn/v1",
-      "apiKey": "sk-xxxx",
-      "model": "gpt-5.6-terra"
+      "baseURL": "https://你的中转站/v1",
+      "apiKey": "sk-你的key",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "minimal"
     },
     {
-      "id": "sol",
-      "name": "GPT-5.6 Sol（备选）",
-      "baseURL": "https://lanfengai.cn/v1",
-      "apiKey": "sk-xxxx",
-      "model": "gpt-5.6-sol"
+      "id": "second",
+      "name": "第二家文本 LLM（顶栏可切换）",
+      "baseURL": "https://api.deepseek.com",
+      "apiKey": "sk-你的key",
+      "model": "deepseek-chat"
     }
   ],
   "image": [
     {
       "id": "img-1",
-      "name": "GPT-Image（风格样张）",
-      "baseURL": "https://lanfengai.cn/v1",
-      "apiKey": "sk-xxxx",
-      "model": "gpt-image-1",
+      "name": "某生图服务（风格样张）",
+      "baseURL": "https://生图服务商/v1",
+      "apiKey": "sk-你的key",
+      "model": "生图模型名",
       "endpoint": "/images/generations"
     }
   ],
-  "video": [
-    {
-      "id": "vid-1",
-      "name": "Kling 2.1（M1 预留，M0 未使用）",
-      "baseURL": "https://api.klingai.com/v1",
-      "apiKey": "sk-xxxx",
-      "model": "kling-v2-1"
-    }
-  ]
+  "video": []
 }

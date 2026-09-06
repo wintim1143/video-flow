@@ -17,6 +17,12 @@ export interface LlmProfile {
   model: string;
   /** image 专用：API 路径，默认 /images/generations */
   endpoint?: string;
+  /**
+   * 推理模型的思考力度（OpenAI 兼容 reasoning_effort）。
+   * 默认 minimal：分镜 JSON 任务不需要深思考，可把耗时降低一个数量级。
+   * 服务商不支持时自动降级去掉该参数。设为 "" 可显式关闭。
+   */
+  reasoningEffort?: string;
 }
 
 export type LlmConfig = Record<LlmKind, LlmProfile[]>;
@@ -30,6 +36,7 @@ interface RawProfile {
   apiKey?: unknown;
   model?: unknown;
   endpoint?: unknown;
+  reasoningEffort?: unknown;
 }
 
 function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
@@ -48,6 +55,8 @@ function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
       apiKey,
       model,
       endpoint: typeof o.endpoint === "string" && o.endpoint.trim() ? o.endpoint.trim() : undefined,
+      reasoningEffort:
+        typeof o.reasoningEffort === "string" && o.reasoningEffort.trim() ? o.reasoningEffort.trim() : undefined,
     });
   });
   return out;
@@ -75,6 +84,7 @@ export function loadLlmConfig(): LlmConfig {
     const baseURL = process.env.LLM_BASE_URL?.trim();
     const model = process.env.LLM_MODEL?.trim();
     if (apiKey && baseURL && model && !apiKey.startsWith("sk-xxxx") && !baseURL.includes("your-gateway")) {
+      const envEffort = process.env.LLM_REASONING_EFFORT?.trim();
       cfg.text = [
         {
           id: "env-default",
@@ -82,6 +92,7 @@ export function loadLlmConfig(): LlmConfig {
           baseURL: baseURL.replace(/\/+$/, ""),
           apiKey,
           model,
+          reasoningEffort: envEffort || "minimal",
         },
       ];
     }
