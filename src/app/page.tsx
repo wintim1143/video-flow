@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AspectRatio, Shot, Storyboard, StyleSpec } from "@/lib/schema";
 import { ASPECT_LABEL, formatTimecode } from "@/lib/schema";
 import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown } from "@/lib/exports";
+import type { LlmConfigsResponse, LlmProfileSafe } from "@/lib/llm-types";
 import { StyleEditor } from "@/components/StyleEditor";
+import { StyleTestImage } from "@/components/StyleTestImage";
 import { Timeline } from "@/components/Timeline";
 import { ShotRow } from "@/components/ShotRow";
 import { CopyButton } from "@/components/CopyButton";
@@ -63,6 +65,27 @@ export default function Page() {
   const [loading, setLoading] = useState<"" | "style" | "shots">("");
   const [error, setError] = useState<ApiError | null>(null);
 
+  // ── LLM profiles（脱敏，来自 /api/llm-configs）──
+  const [profiles, setProfiles] = useState<LlmConfigsResponse>({ text: [], image: [], video: [] });
+  const [textProfileId, setTextProfileId] = useState("");
+  const [imageProfileId, setImageProfileId] = useState("");
+
+  useEffect(() => {
+    fetch("/api/llm-configs")
+      .then((r) => r.json())
+      .then((j) => {
+        if (!j.ok) return;
+        const data = j.data as LlmConfigsResponse;
+        setProfiles(data);
+        // 默认选中第一个
+        setTextProfileId((prev) => (prev && data.text.some((p) => p.id === prev) ? prev : (data.text[0]?.id ?? "")));
+        setImageProfileId((prev) => (prev && data.image.some((p) => p.id === prev) ? prev : (data.image[0]?.id ?? "")));
+      })
+      .catch(() => {
+        /* 配置读取失败不阻塞页面，生成时会报具体错误 */
+      });
+  }, []);
+
   // ── tabs 可用性：有数据才开放切换 ──
   const canStyle = !!style;
   const canShots = !!shots && !!style;
@@ -102,6 +125,13 @@ export default function Page() {
       setError({ code: "BAD_INPUT", message: "请先填写广告需求描述" });
       return;
     }
+    if (!profiles.text.length) {
+      setError({
+        code: "CONFIG_MISSING",
+        message: "尚未配置文本 LLM，已跳过调用（应用其余功能可正常使用）",
+      });
+      return;
+    }
     setLoading("style");
     setError(null);
     try {
@@ -109,6 +139,7 @@ export default function Page() {
         brief: adjust?.trim() ? `${brief}\n\n【风格调整要求】${adjust.trim()}` : brief,
         aspectRatio,
         targetDuration,
+        profileId: textProfileId || undefined,
       };
       const res = await fetch("/api/style", {
         method: "POST",
@@ -132,13 +163,20 @@ export default function Page() {
 
   async function genShots() {
     if (!style) return;
+    if (!profiles.text.length) {
+      setError({
+        code: "CONFIG_MISSING",
+        message: "尚未配置文本 LLM，已跳过调用（应用其余功能可正常使用）",
+      });
+      return;
+    }
     setLoading("shots");
     setError(null);
     try {
       const res = await fetch("/api/shots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brief, aspectRatio, targetDuration, style, shotCount }),
+        body: JSON.stringify({ brief, aspectRatio, targetDuration, style, shotCount, profileId: textProfileId || undefined }),
       });
       const json = await res.json();
       if (!json.ok) {
@@ -175,7 +213,7 @@ export default function Page() {
         </div>
 
         {/* 常驻 tab，可来回切换 */}
-        <nav className="ml-auto flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--panel)] p-1">
+        <nav className="flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--panel)] p-1">
           {tabs.map((t) => (
             <button
               key={t.key}
@@ -192,6 +230,27 @@ export default function Page() {
             </button>
           ))}
         </nav>
+
+        {/* 文本 LLM 切换（风格/分镜生成共用） */}
+        <div className="flex items-center gap-1.5" title="用于生成风格与分镜的文本 LLM">
+          <span className="text-[11px] text-[var(--muted)]">文本LLM</span>
+          <select
+            className="field mono w-44"
+            value={textProfileId}
+            onChange={(e) => setTextProfileId(e.target.value)}
+            disabled={!profiles.text.length}
+          >
+            {profiles.text.length ? (
+              profiles.text.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))
+            ) : (
+              <option value="">未配置</option>
+            )}
+          </select>
+        </div>
       </header>
 
       {error ? (
@@ -201,7 +260,10 @@ export default function Page() {
           </div>
           {error.code === "CONFIG_MISSING" ? (
             <div className="mt-2 text-[12.5px] leading-relaxed text-[var(--muted)]">
-              编辑项目根目录 <code className="mono text-[var(--text)]">.env.local</code>，填入
+              两种方式（任选其一，配置文件优先）：
+              <br />① 项目根目录建 <code className="mono text-[var(--text)]">llm.config.json</code>
+              （参考 <code className="mono text-[var(--text)]">llm.config.example.json</code>，支持多模型，改完刷新页面即生效）；
+              <br />② 编辑 <code className="mono text-[var(--text)]">.env.local</code>，填
               <code className="mono text-[var(--text)]"> LLM_API_KEY / LLM_BASE_URL / LLM_MODEL</code>
               （BaseURL 需带 <code className="mono text-[var(--text)]">/v1</code>），保存后重启 dev server。
             </div>
@@ -291,7 +353,7 @@ export default function Page() {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={loading === "style" || !brief.trim()}
+              disabled={loading === "style" || !brief.trim() || !profiles.text.length}
               onClick={() => genStyle()}
             >
               {loading === "style" ? "匹配风格中…" : "匹配风格 →"}
@@ -308,10 +370,17 @@ export default function Page() {
         </div>
       ) : null}
 
-      {/* ───────── ② 风格（可编辑）───────── */}
+      {/* ───────── ② 风格（可编辑 + 样张）───────── */}
       {tab === "style" && style ? (
         <div className="space-y-4">
           <StyleEditor style={style} onChange={setStyle} />
+
+          <StyleTestImage
+            style={style}
+            imageProfiles={profiles.image}
+            imageProfileId={imageProfileId}
+            onProfileChange={setImageProfileId}
+          />
 
           <div className="panel p-4">
             <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
@@ -344,7 +413,7 @@ export default function Page() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={loading === "shots"}
+                  disabled={loading === "shots" || !profiles.text.length}
                   onClick={genShots}
                 >
                   {loading === "shots" ? "写分镜中…" : `用这个风格写 ${shotCount} 镜 →`}

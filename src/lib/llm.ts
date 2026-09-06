@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { resolveProfile, type LlmProfile } from "./llm-configs";
 
 type ChatMsg = { role: "system" | "user" | "assistant"; content: string };
 
@@ -14,28 +15,16 @@ export class LLMError extends Error {
   }
 }
 
-function readConfig() {
-  const apiKey = process.env.LLM_API_KEY?.trim();
-  const baseURL = process.env.LLM_BASE_URL?.trim();
-  const model = process.env.LLM_MODEL?.trim();
-  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
-
-  const missing: string[] = [];
-  if (!apiKey || apiKey.startsWith("sk-xxxx")) missing.push("LLM_API_KEY");
-  if (!baseURL || baseURL.includes("your-gateway")) missing.push("LLM_BASE_URL");
-  if (!model) missing.push("LLM_MODEL");
-  if (missing.length) {
+/** 取文本 LLM profile；未配置抛 CONFIG_MISSING（含指引） */
+function getTextProfile(profileId?: string): LlmProfile {
+  const p = resolveProfile("text", profileId);
+  if (!p) {
     throw new LLMError(
       "CONFIG_MISSING",
-      `未配置 ${missing.join("、")}。请编辑项目根目录 .env.local 后重启 dev server。`
+      "未配置文本 LLM。请在项目根目录 llm.config.json 的 text 组填入 profile（或保留 .env.local 的三个值作为默认）。"
     );
   }
-  return {
-    apiKey: apiKey as string,
-    baseURL: (baseURL as string).replace(/\/+$/, ""),
-    model: model as string,
-    timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 180_000,
-  };
+  return p;
 }
 
 /** 从模型输出里抠出 JSON：兼容 ```json 围栏、前后废话、多个代码块 */
@@ -55,10 +44,11 @@ export function extractJson(text: string): unknown {
 }
 
 async function callChat(
+  profile: LlmProfile,
   messages: ChatMsg[],
   opts: { jsonMode: boolean; temperature: number; signal: AbortSignal }
 ): Promise<string> {
-  const { apiKey, baseURL, model } = readConfig();
+  const { apiKey, baseURL, model } = profile;
 
   const body: Record<string, unknown> = {
     model,
@@ -102,8 +92,12 @@ export async function chatJSON<T>(params: {
   user: string;
   schema: z.ZodType<T>;
   temperature?: number;
+  /** 文本 LLM profile id；缺省用配置里第一个 */
+  profileId?: string;
 }): Promise<{ data: T; raw: string }> {
-  const { baseURL, model, timeoutMs } = readConfig();
+  const profile = getTextProfile(params.profileId);
+  const { baseURL, model } = profile;
+  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
   const messages: ChatMsg[] = [
     { role: "system", content: params.system },
     { role: "user", content: params.user },
@@ -113,7 +107,7 @@ export async function chatJSON<T>(params: {
   let content = "";
   try {
     try {
-      content = await callChat(messages, {
+      content = await callChat(profile, messages, {
         jsonMode: true,
         temperature,
         signal: AbortSignal.timeout(timeoutMs),
@@ -124,7 +118,7 @@ export async function chatJSON<T>(params: {
       const unsupportedJsonMode =
         /response_format|json_object|json schema|unsupported/i.test(msg) && msg.includes("400");
       if (!unsupportedJsonMode) throw err;
-      content = await callChat(messages, {
+      content = await callChat(profile, messages, {
         jsonMode: false,
         temperature,
         signal: AbortSignal.timeout(timeoutMs),

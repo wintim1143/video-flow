@@ -80,6 +80,8 @@ export const StyleRequestSchema = z.object({
   brief: z.string().min(1, "请输入广告描述"),
   aspectRatio: z.string().default("9:16"),
   targetDuration: z.coerce.number().int().min(5).max(180).default(30),
+  /** 使用哪个文本 LLM profile（llm.config.json text 组的 id）；缺省取第一个 */
+  profileId: z.string().optional(),
 });
 export type StyleRequest = z.infer<typeof StyleRequestSchema>;
 

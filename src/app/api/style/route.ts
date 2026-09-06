@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const { brief, aspectRatio, targetDuration } = parsed.data;
+  const { brief, aspectRatio, targetDuration, profileId } = parsed.data;
 
   try {
     const { data } = await chatJSON({
@@ -31,12 +31,13 @@ export async function POST(req: Request) {
       user: styleUserPrompt({ brief, aspectRatio, targetDuration }),
       schema: StyleSpecSchema,
       temperature: 0.8,
+      profileId,
     });
     return NextResponse.json({ ok: true, data });
   } catch (err) {
     if (err instanceof LLMError) {
       const status =
-        err.code === "CONFIG_MISSING" ? 500 : err.code === "PARSE" ? 422 : err.code === "TIMEOUT" ? 504 : 502;
+        err.code === "CONFIG_MISSING" ? 400 : err.code === "PARSE" ? 422 : err.code === "TIMEOUT" ? 504 : 502;
       return NextResponse.json({ ok: false, code: err.code, message: err.message, detail: err.detail }, { status });
     }
     return NextResponse.json({ ok: false, code: "UNKNOWN", message: String(err) }, { status: 500 });

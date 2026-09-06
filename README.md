@@ -21,6 +21,29 @@ cp .env.example .env.local
 npm run dev          # http://localhost:3200
 ```
 
+## 多 LLM 配置（文本 / 图片 / 视频）
+
+默认只用 `.env.local` 的一个文本 LLM（足够跑通 M0）。需要多模型时，在项目根建 `llm.config.json`（已被 gitignore，key 只存本地；参考 `llm.config.example.json`）：
+
+```json
+{
+  "text": [
+    { "id": "terra", "name": "GPT-5.6 Terra", "baseURL": "https://lanfengai.cn/v1", "apiKey": "sk-xxx", "model": "gpt-5.6-terra" },
+    { "id": "astra", "name": "GPT-6 Astra",   "baseURL": "https://lanfengai.cn/v1", "apiKey": "sk-xxx", "model": "gpt-6-astra" }
+  ],
+  "image": [
+    { "id": "img1", "name": "某生图服务", "baseURL": "https://生图服务商/v1", "apiKey": "sk-xxx", "model": "模型名", "endpoint": "/images/generations" }
+  ],
+  "video": []
+}
+```
+
+- **text**：数组，可配多个。顶栏「文本LLM」下拉随时切换，风格 / 分镜生成共用当前选中项。`name` 缺省用 `model`；`id` 缺省自动生成。
+- **image**：配置后才在 ② 风格 tab 出现「生成风格样张」区块 —— 用当前风格（含你编辑后的色板/关键词）出一张测试图，确认视觉方向是否满意；`endpoint` 缺省 `/images/generations`（OpenAI Images 协议）。
+- **video**：M1 预留，现在配了也不生效。
+- 配置文件存在时**优先于** `.env.local`；无此文件 / 非法 JSON 自动回退 `.env.local` 单文本配置。
+
+
 ## 三步流程
 
 > 三个环节是**常驻 tab**，只要该步有数据就能来回切换（在分镜里切回风格、再切回来都不会丢）。
