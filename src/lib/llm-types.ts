@@ -5,6 +5,8 @@ export type LlmProfileSafe = {
   baseURL: string;
   model: string;
   endpoint?: string;
+  /** 是否支持图片输入；缺省 = 支持，显式 false = 纯文本模型 */
+  vision?: boolean;
 };
 
 export type LlmConfigsResponse = {

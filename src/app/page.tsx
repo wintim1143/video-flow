@@ -125,6 +125,19 @@ export default function Page() {
       });
   }, []);
 
+  /* vision 模型 = 未显式标记纯文本的（缺省视为支持，向后兼容） */
+  const visionTextProfiles = profiles.text.filter((p) => p.vision !== false);
+  /* 有参考图时只能在 vision 模型里选 */
+  const selectableTextProfiles = refImage ? visionTextProfiles : profiles.text;
+
+  /* 上传参考图后：当前选中的若是纯文本模型（如 DS），自动切到第一个 vision 模型 */
+  useEffect(() => {
+    if (refImage && textProfileId && !visionTextProfiles.some((p) => p.id === textProfileId)) {
+      setTextProfileId(visionTextProfiles[0]?.id ?? "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refImage]);
+
   // ── tabs 可用性：有数据才开放切换 ──
   const canStyle = !!style;
   const canShots = !!shots && !!style;
@@ -162,6 +175,14 @@ export default function Page() {
   async function genStyle(adjust?: string) {
     if (!brief.trim() && !refImage) {
       setError({ code: "BAD_INPUT", message: "请填写广告描述，或上传一张参考图" });
+      return;
+    }
+    if (refImage && !visionTextProfiles.length) {
+      setError({
+        code: "VISION_UNSUPPORTED",
+        message:
+          "当前配置里没有支持视觉的模型，无法从参考图提取风格。请在 llm.config.json 给多模态模型配一个 profile（DeepSeek 等纯文本模型请标 vision: false），或去掉参考图改用文字描述。",
+      });
       return;
     }
     if (!profiles.text.length) {
@@ -397,23 +418,25 @@ export default function Page() {
           ))}
         </nav>
 
-        {/* 文本 LLM 切换（风格/分镜生成共用） */}
+        {/* 文本 LLM 切换（风格/分镜生成共用；有参考图时仅显示支持视觉的模型） */}
         <div className="flex items-center gap-1.5" title="用于生成风格与分镜的文本 LLM">
-          <span className="text-[11px] text-[var(--muted)]">文本LLM</span>
+          <span className="text-[11px] text-[var(--muted)]">
+            文本LLM{refImage ? "（视觉）" : ""}
+          </span>
           <select
             className="field mono w-44"
             value={textProfileId}
             onChange={(e) => setTextProfileId(e.target.value)}
-            disabled={!profiles.text.length}
+            disabled={!selectableTextProfiles.length}
           >
-            {profiles.text.length ? (
-              profiles.text.map((p) => (
+            {selectableTextProfiles.length ? (
+              selectableTextProfiles.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
                 </option>
               ))
             ) : (
-              <option value="">未配置</option>
+              <option value="">无支持视觉的模型</option>
             )}
           </select>
         </div>
@@ -568,11 +591,21 @@ export default function Page() {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={loading === "style" || (!brief.trim() && !refImage) || !profiles.text.length}
+              disabled={
+                loading === "style" ||
+                (!brief.trim() && !refImage) ||
+                !selectableTextProfiles.length ||
+                (!!refImage && !visionTextProfiles.length)
+              }
               onClick={() => genStyle()}
             >
               {loading === "style" ? (refImage ? "提取风格中…" : "匹配风格中…") : refImage ? "从参考图提取风格 →" : "匹配风格 →"}
             </button>
+            {refImage && !visionTextProfiles.length ? (
+              <span className="text-[12px]" style={{ color: "var(--err)" }}>
+                配置里没有支持视觉的模型（llm.config.json 中给多模态模型配 profile；DeepSeek 等纯文本模型标 vision: false）
+              </span>
+            ) : null}
             {canStyle ? (
               <button type="button" className="btn" onClick={() => setTab("style")}>
                 查看已匹配风格 →

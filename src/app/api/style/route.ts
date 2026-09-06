@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { StyleRequestSchema, StyleSpecSchema } from "@/lib/schema";
 import { chatJSON, LLMError } from "@/lib/llm";
+import { resolveProfile } from "@/lib/llm-configs";
 import { styleSystemPrompt, styleUserPrompt, styleFromImageSystemPrompt, styleFromImageUserPrompt } from "@/lib/prompts";
 
 export const runtime = "nodejs";
@@ -31,6 +32,21 @@ export async function POST(req: Request) {
       { ok: false, code: "BAD_INPUT", message: "请填写广告描述，或上传一张参考图" },
       { status: 400 }
     );
+  }
+
+  /* 带图请求的服务端防御：所选 profile 明确标记纯文本（vision === false）直接拒绝，不浪费调用 */
+  if (imageDataUrl) {
+    const profile = resolveProfile("text", profileId);
+    if (profile && profile.vision === false) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "VISION_UNSUPPORTED",
+          message: `当前选中的「${profile.name}」是纯文本模型，不支持图片输入。请在顶栏切换到支持视觉的模型，或去掉参考图改用文字描述。`,
+        },
+        { status: 400 }
+      );
+    }
   }
 
   try {

@@ -13,7 +13,8 @@
       "name": "第二家文本 LLM（顶栏可切换）",
       "baseURL": "https://api.deepseek.com",
       "apiKey": "sk-你的key",
-      "model": "deepseek-chat"
+      "model": "deepseek-chat",
+      "vision": false
     }
   ],
   "image": [

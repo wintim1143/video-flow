@@ -23,6 +23,12 @@ export interface LlmProfile {
    * 服务商不支持时自动降级去掉该参数。设为 "" 可显式关闭。
    */
   reasoningEffort?: string;
+  /**
+   * 是否支持图片输入（vision/多模态）。
+   * 缺省(undefined) = 支持（向后兼容：现有配置零改动）；显式 false = 纯文本模型（如 DeepSeek），
+   * 参考图提取风格时前端不可选、服务端拒绝。
+   */
+  vision?: boolean;
 }
 
 export type LlmConfig = Record<LlmKind, LlmProfile[]>;
@@ -37,6 +43,7 @@ interface RawProfile {
   model?: unknown;
   endpoint?: unknown;
   reasoningEffort?: unknown;
+  vision?: unknown;
 }
 
 function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
@@ -57,6 +64,8 @@ function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
       endpoint: typeof o.endpoint === "string" && o.endpoint.trim() ? o.endpoint.trim() : undefined,
       reasoningEffort:
         typeof o.reasoningEffort === "string" && o.reasoningEffort.trim() ? o.reasoningEffort.trim() : undefined,
+      /* 仅显式 false 才标记纯文本；缺省按支持处理（向后兼容） */
+      vision: o.vision === false ? false : undefined,
     });
   });
   return out;
@@ -85,6 +94,7 @@ export function loadLlmConfig(): LlmConfig {
     const model = process.env.LLM_MODEL?.trim();
     if (apiKey && baseURL && model && !apiKey.startsWith("sk-xxxx") && !baseURL.includes("your-gateway")) {
       const envEffort = process.env.LLM_REASONING_EFFORT?.trim();
+      const envVision = process.env.LLM_VISION?.trim();
       cfg.text = [
         {
           id: "env-default",
@@ -93,6 +103,7 @@ export function loadLlmConfig(): LlmConfig {
           apiKey,
           model,
           reasoningEffort: envEffort || "minimal",
+          vision: envVision === "false" || envVision === "0" ? false : undefined,
         },
       ];
     }
