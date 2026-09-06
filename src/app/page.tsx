@@ -48,6 +48,31 @@ function download(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+/** 参考图压缩：最长边 ≤1024px、JPEG 0.85，控制在几百 KB（vision 输入足够且省 token） */
+function fileToCompressedDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const MAX = 1024;
+      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d")?.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("图片读取失败"));
+    };
+    img.src = url;
+  });
+}
+
 export default function Page() {
   const [tab, setTab] = useState<Tab>("input");
   const [brief, setBrief] = useState("");
@@ -62,6 +87,10 @@ export default function Page() {
   const [globalNegative, setGlobalNegative] = useState("");
   const [globalNegativeCn, setGlobalNegativeCn] = useState("");
   const [consistencyNotes, setConsistencyNotes] = useState<string[]>([]);
+
+  // ── 参考图（图生风格路径）：有图时风格从图提取，文字仅作内容补充 ──
+  const [refImage, setRefImage] = useState<{ dataUrl: string; name: string } | null>(null);
+  const [imgLoading, setImgLoading] = useState(false);
 
   const [loading, setLoading] = useState<"" | "style" | "shots">("");
   const [error, setError] = useState<ApiError | null>(null);
@@ -131,8 +160,8 @@ export default function Page() {
   }
 
   async function genStyle(adjust?: string) {
-    if (!brief.trim()) {
-      setError({ code: "BAD_INPUT", message: "请先填写广告需求描述" });
+    if (!brief.trim() && !refImage) {
+      setError({ code: "BAD_INPUT", message: "请填写广告描述，或上传一张参考图" });
       return;
     }
     if (!profiles.text.length) {
@@ -151,6 +180,7 @@ export default function Page() {
         aspectRatio,
         targetDuration,
         profileId: textProfileId || undefined,
+        imageDataUrl: refImage?.dataUrl,
       };
       const res = await fetch("/api/style", {
         method: "POST",
@@ -433,6 +463,55 @@ export default function Page() {
             ))}
           </div>
 
+          {/* 参考图上传：图定风格，文字定内容 */}
+          <div className="mt-5">
+            <div className="mb-1.5 text-[13px] font-medium">
+              参考图 <span className="text-[11.5px] font-normal text-[var(--muted)]">（可选 · 上传后从图中提取视觉风格，文字只补充产品/内容信息）</span>
+            </div>
+            {refImage ? (
+              <div className="flex items-center gap-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={refImage.dataUrl}
+                  alt={refImage.name}
+                  className="h-20 w-20 rounded-lg border border-[var(--border)] object-cover"
+                />
+                <div className="text-[12px] text-[var(--muted)]">
+                  <div className="max-w-48 truncate">{refImage.name}</div>
+                  <div>风格将从此图提取</div>
+                </div>
+                <button type="button" className="btn" onClick={() => setRefImage(null)}>
+                  移除
+                </button>
+              </div>
+            ) : (
+              <label className={`btn inline-flex cursor-pointer items-center gap-2 ${imgLoading ? "opacity-50" : ""}`}>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  disabled={imgLoading}
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = ""; // 允许重复选同一文件
+                    if (!f) return;
+                    setImgLoading(true);
+                    setError(null);
+                    try {
+                      const dataUrl = await fileToCompressedDataUrl(f);
+                      setRefImage({ dataUrl, name: f.name });
+                    } catch (err) {
+                      setError({ code: "BAD_INPUT", message: "图片读取失败，请换一张试试", detail: String(err) });
+                    } finally {
+                      setImgLoading(false);
+                    }
+                  }}
+                />
+                {imgLoading ? "处理图片中…" : "＋ 上传参考图"}
+              </label>
+            )}
+          </div>
+
           <div className="mt-5 grid gap-5 md:grid-cols-2">
             <div>
               <div className="mb-1.5 text-[13px] font-medium">目标时长</div>
@@ -489,10 +568,10 @@ export default function Page() {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={loading === "style" || !brief.trim() || !profiles.text.length}
+              disabled={loading === "style" || (!brief.trim() && !refImage) || !profiles.text.length}
               onClick={() => genStyle()}
             >
-              {loading === "style" ? "匹配风格中…" : "匹配风格 →"}
+              {loading === "style" ? (refImage ? "提取风格中…" : "匹配风格中…") : refImage ? "从参考图提取风格 →" : "匹配风格 →"}
             </button>
             {canStyle ? (
               <button type="button" className="btn" onClick={() => setTab("style")}>

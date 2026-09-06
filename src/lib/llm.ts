@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { resolveProfile, type LlmProfile } from "./llm-configs";
 
-type ChatMsg = { role: "system" | "user" | "assistant"; content: string };
+/** OpenAI 兼容的多模态消息：纯文本时 content 为 string；带图时为 parts 数组 */
+type ChatMsgContent = string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+type ChatMsg = { role: "system" | "user" | "assistant"; content: ChatMsgContent };
 
 export type LLMErrorCode = "CONFIG_MISSING" | "UPSTREAM" | "PARSE" | "TIMEOUT";
 
@@ -120,13 +122,21 @@ export async function chatJSON<T>(params: {
   temperature?: number;
   /** 文本 LLM profile id；缺省用配置里第一个 */
   profileId?: string;
+  /** 可选：随消息附带的图片（data URL 或 http URL），走 OpenAI vision 协议 */
+  imageUrl?: string;
 }): Promise<{ data: T; raw: string; usage: LlmUsage | null }> {
   const profile = getTextProfile(params.profileId);
   const { baseURL, model } = profile;
   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
+  const userContent: ChatMsgContent = params.imageUrl
+    ? [
+        { type: "image_url", image_url: { url: params.imageUrl } },
+        { type: "text", text: params.user },
+      ]
+    : params.user;
   const messages: ChatMsg[] = [
     { role: "system", content: params.system },
-    { role: "user", content: params.user },
+    { role: "user", content: userContent },
   ];
   const temperature = params.temperature ?? 0.7;
 

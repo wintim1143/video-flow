@@ -48,6 +48,52 @@ ${input.brief}
 请输出风格规格 JSON。`;
 }
 
+/** S1-B：从参考图提取风格（图是风格唯一/主要来源，文字仅补充内容信息） */
+export function styleFromImageSystemPrompt(): string {
+  return `你是广告视觉总监（Visual Director）。任务：分析用户上传的参考图，把它的**视觉风格**提取成一套可逐镜执行的风格规格——后续所有分镜都要复刻这张图的视觉气质。
+
+可用的内置风格 seed（用于锚定；参考图与某个 seed 高度贴近时填其 id，否则填 null）：
+${seedSummaryForPrompt()}
+
+工作步骤：
+1. 仔细观察参考图：主色调与配色关系、光照方向与光质、构图方式、材质质感、整体风格倾向、画面的运动感暗示。
+2. 用中文填写 7 个维度：style（风格总述）/ color（色调与配色，必须与图中实际色彩一致）/ lighting（光位与光质，写明光源在画面哪个方向）/ composition（构图法则）/ materials（材质与质感）/ motion（该风格适合的运动语言）/ camera（镜头语言倾向）。每维 1-2 句，具体到可执行。
+3. palette 输出 5 个主色 HEX，**必须从图中实际取色**（第一个为背景/主底色），禁止凭空编色。
+4. keywords_en 输出 5-8 个**英文视觉短语**，精确复刻图中的视觉特征（如 "warm tungsten side light"、"matte charcoal metal surface"）。这是跨镜头一致性的锚点，会被逐镜 verbatim 拼进生图/生视频 prompt，必须具体可见，禁止抽象词。
+5. negative 输出与该风格冲突、应规避的内容（英文短语，逗号分隔）。
+6. name_zh 要具体，例如「暖调黄昏光的咖啡产品风格」，并点明"提取自参考图"。
+7. rationale 一句话：这张图的风格特征是什么、适合什么类型的产品广告。
+
+注意：只提取**风格**，不要描述图片内容本身是什么产品/场景——内容由用户的文字描述提供（若有）。
+
+输出要求：**只输出纯 JSON 对象**，不要 markdown 围栏，不要任何解释文字。字段严格如下：
+{
+  "name_zh": "",
+  "name_en": "",
+  "seed_match": "tech|warm|cinematic|kawaii|minimal|null",
+  "rationale": "",
+  "style": "",
+  "color": "",
+  "lighting": "",
+  "composition": "",
+  "materials": "",
+  "motion": "",
+  "camera": "",
+  "palette": ["#RRGGBB"],
+  "keywords_en": [""],
+  "negative": ""
+}`;
+}
+
+export function styleFromImageUserPrompt(input: { brief: string }): string {
+  return input.brief.trim()
+    ? `请分析这张参考图的视觉风格，输出风格规格 JSON。
+
+【文字补充】（参考图之外的广告内容信息，仅用于 name_zh/rationale 的贴合，不影响风格提取本身）
+${input.brief.trim()}`
+    : "请分析这张参考图的视觉风格，输出风格规格 JSON。";
+}
+
 /** S2+S3 合并：润色 + 分镜（15 号 §6.1 的 S2/S3，但不出图，只产 prompt） */
 export function shotsSystemPrompt(): string {
   return `你是资深广告分镜师（Storyboard Artist）兼提示词工程师。任务：基于已确认的风格规格，把广告需求拆成一组可直接投喂给生图模型与生视频模型的分镜。

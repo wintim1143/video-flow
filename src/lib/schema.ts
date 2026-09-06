@@ -127,11 +127,21 @@ export const OutlineSchema = z.object({
 export type Outline = z.infer<typeof OutlineSchema>;
 
 export const StyleRequestSchema = z.object({
-  brief: z.string().min(1, "请输入广告描述"),
+  /** 文字需求；纯图片提取风格时可为空（brief 与 image 至少一项，route 层校验） */
+  brief: z.string().default(""),
   aspectRatio: z.string().default("9:16"),
   targetDuration: z.coerce.number().int().min(5).max(180).default(30),
   /** 使用哪个文本 LLM profile（llm.config.json text 组的 id）；缺省取第一个 */
   profileId: z.string().optional(),
+  /**
+   * 可选：参考图（data URL，客户端已压缩到 ≤1024px JPEG）。
+   * 有图时走「图片提取风格」路径——brief 可为空串（此时图是唯一输入）。
+   */
+  imageDataUrl: z
+    .string()
+    .max(4_500_000, "图片过大（压缩后仍超 4.5MB）")
+    .refine((v) => v.startsWith("data:image/") || v.startsWith("http"), "图片格式不合法")
+    .optional(),
 });
 export type StyleRequest = z.infer<typeof StyleRequestSchema>;
 
