@@ -47,6 +47,9 @@ export async function POST(req: Request) {
       index,
       start,
       duration: data.duration || outline.outline.find((o) => o.index === index)?.duration || 5,
+      /* 状态链服务端强制覆盖为大纲值（连续性锚点，不依赖 LLM 照抄） */
+      start_state: outline.outline.find((o) => o.index === index)?.start_state || data.start_state,
+      end_state: outline.outline.find((o) => o.index === index)?.end_state || data.end_state,
     });
     return NextResponse.json({
       ok: true,

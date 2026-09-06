@@ -138,6 +138,9 @@ export function outlineSystemPrompt(): string {
 5. 叙事结构：首镜建立场景或抛出痛点 → 中段展示产品与效果 → 末镜品牌落版或行动号召（CTA）。
 6. global_negative 输出全片统一的英文负面词（逗号分隔短语）。
 7. consistency_notes 输出跨镜必须逐字一致的主体/产品属性清单（中文，如产品造型、Logo 位置、人物服装）。
+8. **实体档案 entities**：为每个跨镜出现的主体（产品/人物/载具等）输出一条 { name_zh, descriptor_en }。descriptor_en 是**锁定的英文视觉描述**，必须写明：外观特征 + **朝向/方位的基准约定**（如 "front of the car facing the camera, headlights on, red taillight strip visible"）+ 关键状态词。descriptor_en 会被逐镜 verbatim 拼进生图/生视频 prompt，因此必须具体、自包含，禁止抽象词（如 "beautiful"）。
+9. **状态链 start_state / end_state**：每镜输出镜首状态 start_state 与镜末状态 end_state（中文）。内容必须写明：**主体的朝向与方位**（如"车头朝向镜头偏左 45°"、人物面向右侧）、主体状态（车灯亮灭、门窗开合、人物姿态）、环境状态（时间/天气/光源方向，如"夕阳侧逆光从画面左侧打来"）。
+10. **状态链连续性（最高优先级）**：镜 N 的 end_state 必须与镜 N+1 的 start_state **完全一致**——除非 transition 明确换场/换时，也必须在两处写明"转场后：……"。朝向、光源方向一旦建立，未经转场说明禁止翻转（例如上一镜车头朝向镜头，下一镜不允许凭空变成车尾朝向镜头）。
 
 输出要求：**只输出纯 JSON 对象**，不要 markdown 围栏，不要解释。结构严格如下：
 {
@@ -145,8 +148,11 @@ export function outlineSystemPrompt(): string {
   "shots_count": 6,
   "global_negative": "English, comma separated",
   "consistency_notes": ["跨镜逐字一致的属性"],
+  "entities": [
+    { "name_zh": "主体中文名", "descriptor_en": "locked English visual descriptor with orientation baseline" }
+  ],
   "outline": [
-    { "index": 1, "duration": 5, "shot_type": "全景", "scene": "场景一句话", "action": "唯一动作一句话", "voiceover": "口播或空串" }
+    { "index": 1, "duration": 5, "shot_type": "全景", "scene": "场景一句话", "action": "唯一动作一句话", "voiceover": "口播或空串", "start_state": "镜首状态（朝向/位置/状态+环境）", "end_state": "镜末状态" }
   ]
 }`;
 }
@@ -176,10 +182,11 @@ export function shotDetailSystemPrompt(): string {
 1. **一镜一动作**：只写大纲给定的这一个动作，禁止追加动作或转场。
 2. **首帧优先**：image_prompt 只写**静态画面**——主体外观 + 环境 + 构图 + 光线 + 材质 + 风格关键词。**绝对不能**出现运动、时间流逝、镜头运动类词汇（如 moving、pushing in、slowly、camera）。
 3. **video_prompt** = 该镜静态描述 + 镜头运动（英文）+ 主体动作（英文）+ 时长约束，一整段英文自然句，40-80 词。
-4. **一致性锁定**：image_prompt / video_prompt 必须 **verbatim 带上风格 keywords_en 的全部关键词**；consistency_notes 锁定的属性逐字相同，不得改写或近义替换；与相邻镜头的场景、主体描述保持连贯。
-5. **语言隔离**：image_prompt / video_prompt / negative_prompt 全英文；image_prompt_cn / video_prompt_cn / negative_prompt_cn 是对应英文版的**逐句准确翻译**（不得意译丢失生图技术细节）。scene / subject / action / voiceover / transition_out 等中文字段全中文。
-6. transition_out 写到下一镜的转场方式（硬切 / 叠化 / 匹配剪辑 / 甩镜 等）；如果是最后一个镜头填 "—"。
-7. audio 写本镜音乐/音效方向（中文）。camera_movement 写镜头运动（中文）。
+4. **一致性锁定**：image_prompt / video_prompt 必须 **verbatim 带上风格 keywords_en 的全部关键词**；consistency_notes 锁定的属性逐字相同，不得改写或近义替换；entities 里相关主体的 descriptor_en 必须 **verbatim 嵌入**（可自然融入句子，但朝向与状态词不得改动）。
+5. **状态链衔接（最高优先级，违反即全片错位）**：image_prompt 描述的静态画面必须**严格等于**本镜 start_state——主体的朝向、方位、状态（如车灯亮灭）与光源方向必须与 start_state 完全一致，禁止凭空翻转或改向；video_prompt 必须从 start_state 出发、**连续演化到 end_state 结束**，中间不得跳变。上一镜 end_state 已在下方给出，你的画面就是从那一刻接续的。
+6. **语言隔离**：image_prompt / video_prompt / negative_prompt 全英文；image_prompt_cn / video_prompt_cn / negative_prompt_cn 是对应英文版的**逐句准确翻译**（不得意译丢失生图技术细节）。scene / subject / action / voiceover / transition_out 等中文字段全中文。
+7. transition_out 写到下一镜的转场方式（硬切 / 叠化 / 匹配剪辑 / 甩镜 等）；如果是最后一个镜头填 "—"。
+8. audio 写本镜音乐/音效方向（中文）。camera_movement 写镜头运动（中文）。
 
 输出要求：**只输出纯 JSON 对象**（单镜对象，不是数组），不要 markdown 围栏，不要解释。结构严格如下：
 {
@@ -193,6 +200,8 @@ export function shotDetailSystemPrompt(): string {
   "voiceover": "中文口播/字幕",
   "audio": "音乐与音效",
   "transition_out": "到下一镜的转场",
+  "start_state": "照抄大纲给定的本镜镜首状态，不得改写",
+  "end_state": "照抄大纲给定的本镜镜末状态，不得改写",
   "image_prompt": "English static frame description, 30-60 words",
   "video_prompt": "English motion description with camera movement, 40-80 words",
   "negative_prompt": "English negative words",
@@ -213,6 +222,8 @@ export function shotDetailUserPrompt(input: {
   const compact = input.outline.outline
     .map((o) => `镜${o.index}(${o.duration}s/${o.shot_type})：${o.scene}｜动作：${o.action}`)
     .join("\n");
+  const prevItem = input.outline.outline.find((o) => o.index === input.index - 1);
+  const nextItem = input.outline.outline.find((o) => o.index === input.index + 1);
   const prev = input.neighbors.filter((n) => n.index === input.index - 1)[0];
   const next = input.neighbors.filter((n) => n.index === input.index + 1)[0];
   const last = input.index >= input.outline.outline.length;
@@ -226,6 +237,9 @@ ${JSON.stringify({ style: input.style.style, color: input.style.color, lighting:
 【全片大纲】（保持与其他镜连贯）
 ${compact}
 
+【实体档案】（相关主体的 descriptor_en 必须 verbatim 嵌入两个英文 prompt，朝向与状态词不得改动）
+${input.outline.entities.length ? input.outline.entities.map((e) => `- ${e.name_zh}：${e.descriptor_en}`).join("\n") : "（无）"}
+
 【一致性锁定】（逐字沿用，不得改写）
 ${input.outline.consistency_notes.join("；") || "（无特别锁定项）"}
 
@@ -234,6 +248,6 @@ ${input.outline.consistency_notes.join("；") || "（无特别锁定项）"}
 【本次要展开的镜头】第 ${input.index} 镜：
 ${JSON.stringify(item, null, 2)}
 
-${prev ? `【上一镜（镜${prev.index}）要点】场景：${prev.scene}｜主体：${prev.subject}\n上一镜 image_prompt 开头（衔接参考）：${prev.image_prompt.slice(0, 120)}…\n` : ""}${next ? `【下一镜（镜${next.index}）要点】场景：${next.scene}｜动作：${next.action}\n` : ""}${last ? "【注意】这是最后一个镜头：transition_out 填 \"—\"，画面要有品牌落版或 CTA。\n" : ""}
+${prevItem?.end_state ? `【上一镜（镜${prevItem.index}）末状态】（你的画面必须从此状态接续，朝向/光源/位置不得跳变）\n${prevItem.end_state}\n` : ""}${item.start_state ? `【本镜镜首状态】image_prompt 的静态画面必须严格等于此状态\n${item.start_state}\n` : ""}${item.end_state ? `【本镜镜末状态】video_prompt 必须演化到此状态结束\n${item.end_state}\n` : ""}${prev ? `【上一镜（镜${prev.index}）要点】场景：${prev.scene}｜主体：${prev.subject}\n上一镜 image_prompt 开头（衔接参考）：${prev.image_prompt.slice(0, 120)}…\n` : ""}${next || nextItem ? `【下一镜（镜${(next ?? nextItem)!.index}）要点】场景：${(next ?? nextItem)!.scene}｜动作：${(next ?? nextItem)!.action}\n` : ""}${last ? "【注意】这是最后一个镜头：transition_out 填 \"—\"，画面要有品牌落版或 CTA。\n" : ""}
 请输出第 ${input.index} 镜的完整分镜 JSON。`;
 }

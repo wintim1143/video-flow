@@ -117,6 +117,16 @@ export function ShotRow({
         </span>
       </div>
 
+      {/* 状态链：镜首 ← 上一镜末状态承接 → 镜末（连续性的核心可视信息） */}
+      {shot.start_state || shot.end_state ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2 text-[11.5px] leading-relaxed">
+          <span style={{ color: "var(--accent-2)" }}>状态链</span>
+          {shot.start_state ? <span className="chip whitespace-normal text-left">镜首 {shot.start_state}</span> : null}
+          <span className="text-[var(--muted)]">→</span>
+          {shot.end_state ? <span className="chip whitespace-normal text-left">镜末 {shot.end_state}</span> : null}
+        </div>
+      ) : null}
+
       <div className="grid gap-5 p-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
         {/* 左栏：中文分镜卡（可编辑文案字段） */}
         <div className="space-y-1.5">

@@ -134,6 +134,9 @@ export async function POST(req: Request) {
             index: item.index,
             start: starts.get(item.index) ?? shot.start,
             duration: shot.duration || item.duration,
+            /* 状态链服务端强制覆盖为大纲值（连续性的锚，不依赖 LLM 照抄） */
+            start_state: item.start_state || shot.start_state,
+            end_state: item.end_state || shot.end_state,
           };
           const validated = ShotSchema.parse(fixed);
           shots.push(validated);

@@ -57,6 +57,10 @@ export const ShotSchema = z.object({
   video_prompt_cn: z.string().catch(""),
   /** 中文 · 本镜负面词对照译文（用于展示/人工校准） */
   negative_prompt_cn: z.string().catch(""),
+  /** 中文 · 镜首状态（主体朝向/位置/状态 + 环境），来自大纲，展开时硬性沿用 */
+  start_state: z.string().catch(""),
+  /** 中文 · 镜末状态（该镜结束时主体与环境的定格状态），镜 N+1 的 start_state 必须承接此状态 */
+  end_state: z.string().catch(""),
 });
 export type Shot = z.infer<typeof ShotSchema>;
 
@@ -88,8 +92,20 @@ export const ShotOutlineItemSchema = z.object({
   scene: z.string().catch(""),
   action: z.string().catch(""),
   voiceover: z.string().catch(""),
+  /** 中文 · 镜首状态：主体朝向/位置/状态 + 环境（时间/天气/光源方向）。镜 N+1 必须承接镜 N 的 end_state */
+  start_state: z.string().catch(""),
+  /** 中文 · 镜末状态：该镜结束时主体与环境的定格状态 */
+  end_state: z.string().catch(""),
 });
 export type ShotOutlineItem = z.infer<typeof ShotOutlineItemSchema>;
+
+/** 跨镜主体实体档案：descriptor_en 是锁定英文视觉描述符，逐镜 verbatim 拼进 prompt */
+export const EntitySchema = z.object({
+  name_zh: z.string().catch(""),
+  /** 锁定英文描述（外观/朝向约定/关键状态词），逐镜不得改写 */
+  descriptor_en: z.string().catch(""),
+});
+export type Entity = z.infer<typeof EntitySchema>;
 
 export const OutlineSchema = z.object({
   meta: z
@@ -104,6 +120,8 @@ export const OutlineSchema = z.object({
   global_negative: z.string().catch(""),
   /** 跨镜一致性锁定项，大纲阶段一次产出、逐镜沿用 */
   consistency_notes: z.array(z.string()).catch([]),
+  /** 实体档案：跨镜主体的锁定英文描述符（含朝向约定），大纲阶段一次产出 */
+  entities: z.array(EntitySchema).catch([]),
   outline: z.array(ShotOutlineItemSchema).min(1),
 });
 export type Outline = z.infer<typeof OutlineSchema>;
