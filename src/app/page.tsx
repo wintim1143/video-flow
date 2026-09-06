@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AspectRatio, Outline, Shot, Storyboard, StyleSpec } from "@/lib/schema";
 import { ASPECT_LABEL, formatTimecode } from "@/lib/schema";
 import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown } from "@/lib/exports";
@@ -10,6 +10,7 @@ import { StyleTestImage } from "@/components/StyleTestImage";
 import { Timeline } from "@/components/Timeline";
 import { ShotRow } from "@/components/ShotRow";
 import { CopyButton } from "@/components/CopyButton";
+import { ProgressModal } from "@/components/ProgressModal";
 
 type Tab = "input" | "style" | "shots";
 type ApiError = { code: string; message: string; detail?: string };
@@ -64,6 +65,8 @@ export default function Page() {
 
   const [loading, setLoading] = useState<"" | "style" | "shots">("");
   const [error, setError] = useState<ApiError | null>(null);
+  /** 当前生成请求的中断控制器（弹窗「取消生成」用） */
+  const abortRef = useRef<AbortController | null>(null);
 
   // ── 分镜流式生成进度（两段式：大纲 → 逐镜）──
   const [outline, setOutline] = useState<Outline | null>(null);
@@ -141,6 +144,7 @@ export default function Page() {
     }
     setLoading("style");
     setError(null);
+    abortRef.current = new AbortController();
     try {
       const payload = {
         brief: adjust?.trim() ? `${brief}\n\n【风格调整要求】${adjust.trim()}` : brief,
@@ -152,6 +156,7 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: abortRef.current.signal,
       });
       const json = await res.json();
       if (!json.ok) {
@@ -162,9 +167,11 @@ export default function Page() {
       setShotCount(suggestShotCount(targetDuration));
       setTab("style");
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") return; // 用户取消，静默退出
       setError({ code: "NETWORK", message: "请求失败，请确认 dev server 在运行", detail: String(e) });
     } finally {
       setLoading("");
+      abortRef.current = null;
     }
   }
 
@@ -271,9 +278,11 @@ export default function Page() {
         }
       }
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") return; // 用户取消，静默退出
       setError({ code: "NETWORK", message: "请求失败，请确认 dev server 在运行", detail: String(e) });
     } finally {
       setLoading("");
+      abortRef.current = null;
       setProgress((p) => ({ ...p, phase: "" }));
     }
   }
@@ -303,8 +312,7 @@ export default function Page() {
         setError({ code: json.code, message: json.message, detail: json.detail });
         setFailedShots((prev) => [...prev, index]);
         return;
-      }
-      const s = json.data as Shot;
+      }const s = json.data as Shot;
       setShots((prev) => {
         const list = (prev ?? []).filter((x) => x.index !== s.index);
         list.push(s);
@@ -313,8 +321,15 @@ export default function Page() {
       });
       setProgress((p) => ({ ...p, phase: "", done: 1, last: `第 ${index} 镜重试成功 · ${((json.meta?.ms ?? 0) / 1000).toFixed(1)}s` }));
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") {
+        setFailedShots((prev) => [...prev, index]); // 取消重试 → 恢复失败标记
+        return;
+      }
       setError({ code: "NETWORK", message: "重试请求失败", detail: String(e) });
       setFailedShots((prev) => [...prev, index]);
+    } finally {
+      abortRef.current = null;
+      setProgress((p) => ({ ...p, phase: "" })); // 任何路径都关闭弹窗
     }
   }
 
@@ -679,6 +694,15 @@ export default function Page() {
           </div>
         </div>
       ) : null}
+      {/* ───────── 生成进度弹窗：锁定页面，防止生成期间误触 ───────── */}
+      <ProgressModal
+        open={loading === "style" || progress.phase !== ""}
+        kind={loading === "style" ? "style" : progress.phase}
+        done={progress.done}
+        total={progress.total}
+        message={progress.last}
+        onCancel={() => abortRef.current?.abort()}
+      />
     </main>
   );
 }
