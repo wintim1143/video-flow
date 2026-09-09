@@ -12,12 +12,17 @@ export function allImagePrompts(storyboard: Storyboard): string {
 }
 
 export function allVideoPrompts(storyboard: Storyboard, globalNegative: string): string {
-  return storyboard.shots
-    .map(
-      (s) =>
-        `#${s.index} [${formatTimecode(s.start)}-${formatTimecode(s.start + s.duration)}] ${s.duration}s\n${s.video_prompt}\nNegative: ${[globalNegative, s.negative_prompt].filter(Boolean).join(", ")}`
-    )
-    .join("\n\n");
+  const total = storyboard.shots.reduce((acc, s) => acc + s.duration, 0);
+  const head = `【广告视频 · 画幅 ${storyboard.meta.aspect_ratio || "9:16"} · 总时长约 ${Math.round(total)}秒 · 共 ${storyboard.shots.length} 镜 · 按镜序串行生成，每镜末帧作为下一镜首帧参考】\n\n`;
+  return (
+    head +
+    storyboard.shots
+      .map(
+        (s) =>
+          `#${s.index} [${formatTimecode(s.start)}-${formatTimecode(s.start + s.duration)}] 本镜 ${s.duration}s\n${s.video_prompt}${s.beats?.length ? `\nSecond-by-second beats: ${s.beats.join(" | ")}` : ""}\nNegative: ${[globalNegative, s.negative_prompt].filter(Boolean).join(", ")}`
+      )
+      .join("\n\n")
+  );
 }
 
 function shotMd(s: Shot, globalNegative: string): string {
@@ -35,6 +40,10 @@ function shotMd(s: Shot, globalNegative: string): string {
   if (s.image_prompt_cn) lines.push(`**Image Prompt 中文对照**`, "```", s.image_prompt_cn, "```");
   lines.push(`**Video Prompt · 图生视频（EN）**`, "```", s.video_prompt, "```");
   if (s.video_prompt_cn)   lines.push(`**Video Prompt 中文对照**`, "```", s.video_prompt_cn, "```");
+  if (s.beats?.length) {
+    lines.push(`**秒级节拍（EN）**`, "```", ...s.beats, "```");
+    if (s.beats_cn?.length) lines.push(`**秒级节拍 中文对照**`, "```", ...s.beats_cn, "```");
+  }
   lines.push(
     `**Negative（EN）**`,
     "```",
@@ -54,7 +63,7 @@ export function toMarkdown(storyboard: Storyboard, style: StyleSpec): string {
   const head = [
     `# ${m.title || "广告分镜脚本"}`,
     "",
-    `> 风格：${style.name_zh}${style.name_en ? `（${style.name_en}）` : ""} ｜ 画幅 ${m.aspect_ratio} ｜ 目标 ${m.target_duration}s / 实际 ${total.toFixed(1)}s ｜ ${storyboard.shots.length} 镜`,
+    `> 类型：广告（Commercial）｜ 风格：${style.name_zh}${style.name_en ? `（${style.name_en}）` : ""} ｜ 画幅 ${m.aspect_ratio} ｜ 目标 ${m.target_duration}s / 实际 ${total.toFixed(1)}s ｜ ${storyboard.shots.length} 镜`,
     "",
     "## 风格规格",
     "",
@@ -83,6 +92,10 @@ export function toMarkdown(storyboard: Storyboard, style: StyleSpec): string {
     head.push("## 跨镜一致性锁定", "", ...storyboard.consistency_notes.map((n) => `- ${n}`), "");
   }
   head.push("## 分镜", "");
+  head.push(
+    "> **尾帧链工作流**：按镜序串行生成视频 → 每镜生成后截取最后一帧 → 下一镜用该帧作为首帧生图参考（图生视频），两镜动势即可无缝衔接；换场镜按各镜标注的转场方式拼接。",
+    ""
+  );
   return [
     ...head,
     ...storyboard.shots.map((s) => shotMd(s, storyboard.global_negative)),

@@ -1,5 +1,6 @@
 import { ShotsRequestSchema, OutlineSchema, ShotSchema, type Shot } from "@/lib/schema";
 import { chatJSON, LLMError } from "@/lib/llm";
+import { newTraceId } from "@/lib/trace-log";
 import {
   outlineSystemPrompt,
   outlineUserPrompt,
@@ -39,6 +40,7 @@ export async function POST(req: Request) {
   }
   const { brief, aspectRatio, targetDuration, style, shotCount, profileId } = parsed.data;
   const count = shotCount ?? suggestShotCount(targetDuration);
+  const traceId = newTraceId(); // 一次分镜生成 = 一条链路（大纲 + 各镜共用）
 
   const encoder = new TextEncoder();
   const traces: Array<{ step: string; message: string; ms: number; usage?: unknown }> = [];
@@ -71,6 +73,7 @@ export async function POST(req: Request) {
           schema: OutlineSchema,
           temperature: 0.6,
           profileId,
+          trace: { traceId, step: "outline" },
         });
         const ms1 = Math.round(performance.now() - s1);
         trace("outline_done", `大纲完成：${outline.outline.length} 镜 · ${(ms1 / 1000).toFixed(1)}s`, {
@@ -87,12 +90,14 @@ export async function POST(req: Request) {
           acc += o.duration;
         }
 
-        /* ── step 2：逐镜展开（并发 2 的流水线；单镜失败自动重试 1 次，仍失败跳过并上报）──
-         * 单镜相互独立（一致性由 keywords_en verbatim + consistency_notes 锁定），
-         * 并发 2 把总时长近似减半，且每个请求输出体量小、成功率高。 */
+        /* ── step 2：逐镜展开（串行流水线，尾帧链）──
+         * 串行的原因（参考 ai-video-pipeline / StoryMem 的尾帧链模式）：
+         * 每镜生成后，其成品（image_prompt / end_state）会作为 neighbors 喂给下一镜，
+         * 实现「镜 N 末帧 = 镜 N+1 首帧」的动势衔接；并发会丢失这种接力。
+         * 单镜失败自动重试 1 次，仍失败跳过并上报。 */
         const shots: Shot[] = [];
         const failed: number[] = [];
-        const CONCURRENCY = 2;
+        const CONCURRENCY = 1; // 串行：下一镜依赖上一镜成品做尾帧衔接
         let cursor = 0;
 
         async function genOneShot(item: (typeof outline.outline)[number]): Promise<void> {
@@ -114,6 +119,7 @@ export async function POST(req: Request) {
                 schema: ShotSchema,
                 temperature: 0.7,
                 profileId,
+                trace: { traceId, step: `shot_${item.index}` },
               });
               shot = data;
               break;
@@ -137,6 +143,8 @@ export async function POST(req: Request) {
             /* 状态链服务端强制覆盖为大纲值（连续性的锚，不依赖 LLM 照抄） */
             start_state: item.start_state || shot.start_state,
             end_state: item.end_state || shot.end_state,
+            /* 转场设计同样以大纲为准（大纲阶段统一规划，防止逐镜自由发挥导致生硬跳切） */
+            transition_out: item.transition_out || shot.transition_out,
           };
           const validated = ShotSchema.parse(fixed);
           shots.push(validated);

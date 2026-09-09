@@ -49,6 +49,13 @@ export const ShotSchema = z.object({
   image_prompt: z.string().catch(""),
   /** 英文 · 生视频 prompt（= 静态描述 + 镜头运动 + 动作 + 时长）。用于生成，主版本 */
   video_prompt: z.string().catch(""),
+  /**
+   * 英文 · 秒级节拍：把本镜动作按时段拆分（如 "0-1s: ..."，末拍可短），首拍从 start_state 出发、
+   * 末拍结束于 end_state。投喂生视频模型时帮助控制节奏，防止所有动作挤在一段粗粒度描述里。
+   */
+  beats: z.array(z.string()).catch([]),
+  /** 中文 · beats 对照译文（用于展示/人工校准，不投喂生成） */
+  beats_cn: z.array(z.string()).catch([]),
   /** 英文 · 本镜负面词 */
   negative_prompt: z.string().catch(""),
   /** 中文 · image_prompt 对照译文（用于展示/人工校准，不投喂生成） */
@@ -96,6 +103,8 @@ export const ShotOutlineItemSchema = z.object({
   start_state: z.string().catch(""),
   /** 中文 · 镜末状态：该镜结束时主体与环境的定格状态 */
   end_state: z.string().catch(""),
+  /** 中文 · 本镜到下一镜的转场方式与衔接画面（同场景=匹配剪辑/首尾帧衔接；换场=硬切/叠化等）。展开时照抄，不让 LLM 自由发挥 */
+  transition_out: z.string().catch(""),
 });
 export type ShotOutlineItem = z.infer<typeof ShotOutlineItemSchema>;
 
@@ -130,7 +139,7 @@ export const StyleRequestSchema = z.object({
   /** 文字需求；纯图片提取风格时可为空（brief 与 image 至少一项，route 层校验） */
   brief: z.string().default(""),
   aspectRatio: z.string().default("9:16"),
-  targetDuration: z.coerce.number().int().min(5).max(180).default(30),
+  targetDuration: z.coerce.number().int().min(5).max(180).default(5),
   /** 使用哪个文本 LLM profile（llm.config.json text 组的 id）；缺省取第一个 */
   profileId: z.string().optional(),
   /**

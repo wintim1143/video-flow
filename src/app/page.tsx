@@ -30,7 +30,7 @@ const EXAMPLES = [
   },
 ];
 
-const DURATION_PRESETS = [15, 30, 60];
+const DURATION_PRESETS = [5, 15, 30, 60];
 
 function suggestShotCount(targetDuration: number): number {
   return Math.min(24, Math.max(2, Math.round(targetDuration / 5)));
@@ -440,6 +440,15 @@ export default function Page() {
             )}
           </select>
         </div>
+
+        {/* 链路日志入口（/logs：LLM 调用回看 + 两次运行对比 + 微调导出） */}
+        <a
+          href="/logs"
+          className="ml-auto rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-1.5 text-[12.5px] text-[var(--muted)] transition-colors hover:text-[var(--text)]"
+          title="LLM 调用链路日志：回看、对比、微调导出"
+        >
+          链路日志
+        </a>
       </header>
 
       {error ? (
@@ -560,7 +569,7 @@ export default function Page() {
                   max={180}
                   value={targetDuration}
                   onChange={(e) => {
-                    const v = Number(e.target.value) || 30;
+                    const v = Number(e.target.value) || 5;
                     setTargetDuration(v);
                     setShotCount(suggestShotCount(v));
                   }}
@@ -782,6 +791,7 @@ export default function Page() {
             <ShotRow
               key={s.index}
               shot={s}
+              aspectRatio={storyboard.meta.aspect_ratio}
               globalNegative={globalNegative}
               globalNegativeCn={globalNegativeCn}
               onShot={(next) => patchShot(s.index, next)}

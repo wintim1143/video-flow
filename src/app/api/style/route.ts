@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { StyleRequestSchema, StyleSpecSchema } from "@/lib/schema";
 import { chatJSON, LLMError } from "@/lib/llm";
 import { resolveProfile } from "@/lib/llm-configs";
+import { newTraceId } from "@/lib/trace-log";
 import { styleSystemPrompt, styleUserPrompt, styleFromImageSystemPrompt, styleFromImageUserPrompt } from "@/lib/prompts";
 
 export const runtime = "nodejs";
@@ -60,6 +61,7 @@ export async function POST(req: Request) {
       temperature: 0.8,
       profileId,
       imageUrl: imageDataUrl,
+      trace: { traceId: newTraceId(), step: fromImage ? "style_from_image" : "style" },
     });
     return NextResponse.json({ ok: true, data });
   } catch (err) {

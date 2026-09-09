@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { resolveProfile, type LlmProfile } from "./llm-configs";
+import { appendTrace, newTraceId } from "./trace-log";
 
 /** OpenAI 兼容的多模态消息：纯文本时 content 为 string；带图时为 parts 数组 */
 type ChatMsgContent = string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
@@ -110,6 +111,15 @@ async function callChat(
   return { content, usage };
 }
 
+/** 带图时把多模态 parts 拍平成纯文本（图只留占位符，不进日志文件） */
+function flattenUserContent(c: ChatMsgContent): string {
+  if (typeof c === "string") return c;
+  return c
+    .map((p) => (p.type === "text" ? p.text : "[image]"))
+    .join("\n")
+    .replace(/^\[image\]/, "[image] ");
+}
+
 /**
  * 调一次 chat，拿 JSON 并按 schema 校验。
  * 失败会抛出带 code 的 LLMError，route 层据此映射 HTTP 状态。
@@ -124,6 +134,11 @@ export async function chatJSON<T>(params: {
   profileId?: string;
   /** 可选：随消息附带的图片（data URL 或 http URL），走 OpenAI vision 协议 */
   imageUrl?: string;
+  /**
+   * 可选：链路追踪上下文。传入后本次调用（含降级重试）会落一条日志到
+   * .data/traces.jsonl，供 /logs 页面回看与对比。缺省不记录。
+   */
+  trace?: { traceId: string; step: string };
 }): Promise<{ data: T; raw: string; usage: LlmUsage | null }> {
   const profile = getTextProfile(params.profileId);
   const { baseURL, model } = profile;
@@ -140,6 +155,33 @@ export async function chatJSON<T>(params: {
   ];
   const temperature = params.temperature ?? 0.7;
 
+  /* 链路追踪：记录尝试次数 / 降级参数 / 总耗时，调用结束后落一条日志 */
+  const t0 = performance.now();
+  let attempts = 0;
+  const degraded: string[] = [];
+  const userText = flattenUserContent(userContent);
+  const writeLog = (ok: boolean, extra: { raw?: string; error?: string; usage?: LlmUsage | null }) => {
+    if (!params.trace) return;
+    appendTrace({
+      traceId: params.trace.traceId,
+      step: params.trace.step,
+      model,
+      profileId: profile.id,
+      profileName: profile.name,
+      temperature,
+      hasImage: !!params.imageUrl,
+      attempts,
+      degraded,
+      ok,
+      latencyMs: Math.round(performance.now() - t0),
+      raw: extra.raw,
+      error: extra.error,
+      usage: extra.usage ?? usage,
+      system: params.system,
+      user: userText,
+    });
+  };
+
   let content = "";
   let usage: LlmUsage | null = null;
   try {
@@ -151,6 +193,7 @@ export async function chatJSON<T>(params: {
     const queue: Array<{ jsonMode: boolean; effort?: string }> = [{ jsonMode: true, effort }];
     while (queue.length) {
       const v = queue.shift() as { jsonMode: boolean; effort?: string };
+      attempts++;
       try {
         const r = await callChat(profile, messages, {
           jsonMode: v.jsonMode,
@@ -166,13 +209,29 @@ export async function chatJSON<T>(params: {
         const is400 = msg.includes("400");
         // 服务商不认 reasoning_effort → 去掉重试
         if (v.effort && is400 && /reasoning/i.test(msg)) {
+          degraded.push("reasoning_effort");
           queue.unshift({ jsonMode: v.jsonMode });
           continue;
         }
         // 中转站不认 response_format → 去掉重试
         if (v.jsonMode && is400 && /response_format|json_object|json schema|unsupported/i.test(msg)) {
+          degraded.push("response_format");
           queue.unshift({ jsonMode: false, effort: v.effort });
           continue;
+        }
+        // 通用 400 参数错误（报错文案不带具体参数名，实测中转站对
+        // temperature+response_format+reasoning_effort 组合会拒）→ 逐级降级重试
+        if (is400 && /invalid_request|参数错误|invalid/i.test(msg)) {
+          if (v.jsonMode) {
+            degraded.push("response_format(generic-400)");
+            queue.unshift({ jsonMode: false, effort: v.effort });
+            continue;
+          }
+          if (v.effort) {
+            degraded.push("reasoning_effort(generic-400)");
+            queue.unshift({ jsonMode: false });
+            continue;
+          }
         }
         throw err;
       }
@@ -193,12 +252,20 @@ export async function chatJSON<T>(params: {
         result.error.issues.slice(0, 6).map((i) => `${i.path.join(".")}: ${i.message}`).join(" | ")
       );
     }
+    writeLog(true, { raw: content, usage });
     return { data: result.data, raw: content, usage };
   } catch (err) {
-    if (err instanceof LLMError) throw err;
-    if (err instanceof Error && err.name === "TimeoutError") {
-      throw new LLMError("TIMEOUT", `LLM 调用超时（${timeoutMs}ms）`, `${baseURL} · ${model}`);
-    }
-    throw new LLMError("UPSTREAM", `无法连接 LLM（${baseURL}）`, String(err).slice(0, 500));
+    const e =
+      err instanceof LLMError
+        ? err
+        : err instanceof Error && err.name === "TimeoutError"
+          ? new LLMError("TIMEOUT", `LLM 调用超时（${timeoutMs}ms）`, `${baseURL} · ${model}`)
+          : new LLMError("UPSTREAM", `无法连接 LLM（${baseURL}）`, String(err).slice(0, 500));
+    writeLog(false, {
+      raw: content || undefined,
+      error: `${e.code}: ${e.message}${e.detail ? ` | ${e.detail}` : ""}`,
+      usage,
+    });
+    throw e;
   }
 }

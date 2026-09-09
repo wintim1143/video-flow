@@ -11,6 +11,8 @@ yarn-error.log*
 .env.local
 .env*.local
 llm.config.json
+.data
 .vercel
 *.tsbuildinfo
 next-env.d.ts
+.probe/

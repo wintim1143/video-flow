@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { SingleShotRequestSchema, ShotSchema, type Shot } from "@/lib/schema";
 import { chatJSON, LLMError } from "@/lib/llm";
+import { newTraceId } from "@/lib/trace-log";
 import { shotDetailSystemPrompt, shotDetailUserPrompt } from "@/lib/prompts";
 
 export const runtime = "nodejs";
@@ -35,6 +36,7 @@ export async function POST(req: Request) {
       schema: ShotSchema,
       temperature: 0.7,
       profileId,
+      trace: { traceId: newTraceId(), step: `shot_retry:${index}` },
     });
     /* start 时间轴以邻居为准重算（服务端兜底，不信 LLM 算术） */
     const prev = neighbors.filter((n) => n.index === index - 1)[0];
@@ -50,6 +52,8 @@ export async function POST(req: Request) {
       /* 状态链服务端强制覆盖为大纲值（连续性锚点，不依赖 LLM 照抄） */
       start_state: outline.outline.find((o) => o.index === index)?.start_state || data.start_state,
       end_state: outline.outline.find((o) => o.index === index)?.end_state || data.end_state,
+      /* 转场设计同样以大纲为准 */
+      transition_out: outline.outline.find((o) => o.index === index)?.transition_out || data.transition_out,
     });
     return NextResponse.json({
       ok: true,

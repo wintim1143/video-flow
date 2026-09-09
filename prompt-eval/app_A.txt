@@ -1,0 +1,53 @@
+【需求原文】一款简约现代的视频播放器 App 推广广告。内容：一位年轻女性在笔记本电脑上使用该播放器观看视频，展示播放/暂停、拖动进度条、调节音量等丝滑交互，界面为紫色主题、干净优雅。要求突出产品的易用性与现代 UI 设计质感。
+
+【约束】画幅 16:9，总时长约 10 秒。
+
+【提示词全文】
+It’s just a video player on localhost:8080. That’s what I keep telling myself.
+
+Minimax H3 on @FishCreativeHQ 
+
+Prompt
+
+Fixed-camera desktop screen recording of a real Windows 11 Chrome window filling the entire frame. Do not restyle the browser as a mockup, poster, or floating card. Keep the exact chrome from the reference still for every frame.
+
+Browser frame (locked, zero motion):
+- Tab title: Local Video Player
+- Address bar URL: localhost:8080
+- Bookmarks bar left to right: Apps, Work, Personal, Google, GitHub, Docs, YouTube, then Other bookmarks on the right
+- Chrome controls: back, forward, refresh, extensions, profile avatar “M”, puzzle piece, shield, three-dot menu
+- Windows 11 taskbar along the bottom: search “Type here to search”, File Explorer, Google Chrome, Visual Studio Code, system tray, time 10:30 AM, date 5/20/2024
+
+Page layout (labels, colors, and positions never change):
+- Left: large HTML5 video canvas
+- Under the canvas: play/pause triangle, timecode starting 00:00 / 00:10, purple seek bar, speaker, purple volume slider, fullscreen icon
+- Right sidebar on near-black:
+  - “Video Player” with purple clapperboard icon
+  - Controls: Space Play / Pause; ← → Seek ±5 seconds; ↑ ↓ Volume ±10%; F Toggle Fullscreen; M Mute / Unmute
+  - Playlist: purple play arrow, “Sample Video”, 00:10
+  - Playback Rate: 0.5x, 1x filled purple and selected, 1.5x, 2x
+
+Character identity (must stay the same person in every pose):
+Photoreal young woman, long wavy blonde hair, gray school-style blazer over a white collared shirt, gray pleated mini skirt, black knee-high socks. Same face, same proportions, same outfit. Location stays the green grassy hill under a pale overcast sky. No costume change, no second character, no extra props.
+
+Motion rules:
+- Camera never moves. Browser chrome, sidebar, bookmarks, taskbar, and all UI text stay perfectly still.
+- Only the video canvas animates. Treat the canvas as a short fashion / pose test clip of the same girl on the hill.
+- Playback runs continuously at 1x. Do not pause the player. Do not flash a big pause icon. Do not cut away from the hill.
+- Timecode and the purple progress thumb advance smoothly from 00:00 to 00:10.
+
+Pose sequence inside the canvas (hold each pose ~1.5–2 seconds, then transition with natural body motion, hair, and cloth, not a hard cut):
+
+1. Start pose (match the reference still): leaning forward, both hands on her knees, looking into camera with a pout.
+2. Rise and stand tall: she straightens up, hands leave her knees, stands facing camera with arms relaxed at her sides, chin slightly lifted, wind moving her hair.
+3. Hands-on-hips: she plants both hands on her hips, weight on one leg, slight hip cock, blazer and skirt settling, confident look into camera.
+4. Turn / three-quarter: she twists her torso to her right, looks back over her shoulder toward camera, hair swinging, one hand lightly holding the hem of the skirt so it does not lift unnaturally.
+5. Crouch / ready: she drops into a low athletic crouch, fingertips brushing the grass, still looking up at camera, same pout softening into a small smirk.
+6. End pose: she stands again, steps one foot forward, both hands clasp in front of her thighs, then eases back toward the original lean-with-hands-on-knees so the last frame rhymes with the first still.
+
+Transitions must look like the same live-action take: weight shifts, knee bend, hair lag, grass and sky stay consistent. No teleport, no outfit swap, no extra readable text burned into the video.
+
+Audio: quiet outdoor hill ambience only. No music, no voiceover, no UI click spam.
+
+Style: photoreal live-action screen capture of a local demo page running in Chrome. Not animation, not a trailer, not a poster.
+Duration: about 10 seconds. Aspect: 16:9 desktop.

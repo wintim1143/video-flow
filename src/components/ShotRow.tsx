@@ -28,6 +28,16 @@ function patchField(
   onShot({ ...shot, [field]: value });
 }
 
+/** 编辑某个 shot 的字符串数组字段（beats / beats_cn） */
+function patchList(
+  shot: Shot,
+  field: "beats" | "beats_cn",
+  next: string[],
+  onShot: (nextShot: Shot) => void
+) {
+  onShot({ ...shot, [field]: next });
+}
+
 /** 中文提示词切换按钮组 */
 function LangToggle({ lang, setLang }: { lang: Lang; setLang: (l: Lang) => void }) {
   return (
@@ -57,6 +67,7 @@ function BilingualPrompt({
   lang,
   onEn,
   onCn,
+  copyPrefix,
 }: {
   label: string;
   en: string;
@@ -65,14 +76,17 @@ function BilingualPrompt({
   lang: Lang;
   onEn: (v: string) => void;
   onCn: (v: string) => void;
+  /** 复制时附加的前置说明（画幅/时长/类型，投喂豆包等平台时免得再确认） */
+  copyPrefix?: string;
 }) {
+  const copyText = (base: string) => (copyPrefix ? `${copyPrefix}\n${base}` : base);
   return (
     <div className="mb-3">
       <div className="mb-1 flex items-center justify-between">
         <span className="text-[12px] font-medium" style={{ color: accent }}>
           {label}
         </span>
-        <CopyButton text={lang === "en" ? en : cn || en} label="复制" />
+        <CopyButton text={copyText(lang === "en" ? en : cn || en)} label="复制" />
       </div>
       {lang === "en" ? (
         <EditableText value={en} onCommit={onEn} mono placeholder={label} />
@@ -83,13 +97,55 @@ function BilingualPrompt({
   );
 }
 
+/** 秒级节拍编辑块（beats：按时段拆分的连续小动作，节奏控制核心） */
+function BeatsBlock({
+  beats,
+  beatsCn,
+  lang,
+  onBeats,
+  onBeatsCn,
+}: {
+  beats: string[];
+  beatsCn: string[];
+  lang: Lang;
+  onBeats: (next: string[]) => void;
+  onBeatsCn: (next: string[]) => void;
+}) {
+  const list = lang === "en" ? beats : beatsCn.length ? beatsCn : beats;
+  if (!list.length) return null;
+  const update = (i: number, v: string) => {
+    const next = [...list];
+    next[i] = v;
+    if (lang === "en") onBeats(next);
+    else onBeatsCn(next);
+  };
+  return (
+    <div className="mb-3">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-[12px] font-medium" style={{ color: "var(--accent-2)" }}>
+          秒级节拍 · Beats
+        </span>
+        <CopyButton text={list.join("\n")} label="复制" />
+      </div>
+      <div className="space-y-1">
+        {list.map((b, i) => (
+          <EditableText key={i} value={b} onCommit={(v) => update(i, v)} mono placeholder={`节拍 ${i + 1}`} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ShotRow({
   shot,
+  aspectRatio,
   globalNegative,
   globalNegativeCn,
   onShot,
 }: {
   shot: Shot;
+  /** 画幅（来自分镜 meta），复制视频 prompt 时作为前置说明 */
+  aspectRatio?: string;
   globalNegative: string;
   globalNegativeCn?: string;
   onShot: (next: Shot) => void;
@@ -156,6 +212,18 @@ export function ShotRow({
             lang={lang}
             onEn={(v) => patchField(shot, "video_prompt", v, onShot)}
             onCn={(v) => patchField(shot, "video_prompt_cn", v, onShot)}
+            copyPrefix={
+              lang === "en"
+                ? `【广告视频 · 画幅 ${aspectRatio || "9:16"} · 本镜时长 ${shot.duration}秒 · 单镜独立生成】`
+                : undefined
+            }
+          />
+          <BeatsBlock
+            beats={shot.beats ?? []}
+            beatsCn={shot.beats_cn ?? []}
+            lang={lang}
+            onBeats={(next) => patchList(shot, "beats", next, onShot)}
+            onBeatsCn={(next) => patchList(shot, "beats_cn", next, onShot)}
           />
           <div>
             <div className="mb-1 flex items-center justify-between">
