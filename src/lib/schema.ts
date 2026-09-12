@@ -68,6 +68,15 @@ export const ShotSchema = z.object({
   start_state: z.string().catch(""),
   /** 中文 · 镜末状态（该镜结束时主体与环境的定格状态），镜 N+1 的 start_state 必须承接此状态 */
   end_state: z.string().catch(""),
+  /**
+   * 闸门 2 产物：本镜关键帧图的**公网可达 URL**（由 `image_prompt` 生成）。
+   *
+   * 有值即作为 I2V 的 `first_frame`（适配器自动推断成 keyframe 模式），
+   * 为空则退化为纯文生视频。必须是 URL 而非 base64 —— 上游要能自己把这张图拉下来。
+   */
+  keyframe_url: z.string().catch(""),
+  /** 生成本关键帧时**实际使用**的 prompt（`image_prompt` 事后可能被编辑，留档便于对比重生成） */
+  keyframe_prompt_used: z.string().catch(""),
 });
 export type Shot = z.infer<typeof ShotSchema>;
 

@@ -30,10 +30,17 @@ export interface LlmProfile {
    */
   vision?: boolean;
   /**
-   * video 专用：视频生成接口要求的 mode 取值（如 Agnes Video 的 text / image 模式）。
-   * 各平台取值不同且文档各异，因此不在代码里硬编码，由配置提供；缺失时 /api/video 明确报错。
+   * video 专用：视频生成接口要求的 mode 取值（如 Agnes Video 的 text / keyframe / reference）。
+   * 通常**不需要填**——适配器会按实际传入的媒体字段自动推断（有首尾帧→keyframe，有参考图/音频→reference，否则 text）。
+   * 仅在需要强制覆盖推断结果时才配置。
    */
   mode?: string;
+  /**
+   * video 专用：厂商适配器 id（见 lib/video-providers.ts 的 PROVIDERS）。
+   * 不同厂商的创建路径、查询路径、字段命名、时长类型、成片地址位置全都不同，
+   * 因此由适配器吸收差异。缺省时按 baseURL 推断（含 agnes 字样走 agnes，否则走通用 OpenAI Videos 形态）。
+   */
+  provider?: string;
 }
 
 export type LlmConfig = Record<LlmKind, LlmProfile[]>;
@@ -50,6 +57,7 @@ interface RawProfile {
   reasoningEffort?: unknown;
   vision?: unknown;
   mode?: unknown;
+  provider?: unknown;
 }
 
 function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
@@ -73,6 +81,7 @@ function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
       /* 仅显式 false 才标记纯文本；缺省按支持处理（向后兼容） */
       vision: o.vision === false ? false : undefined,
       mode: typeof o.mode === "string" && o.mode.trim() ? o.mode.trim() : undefined,
+      provider: typeof o.provider === "string" && o.provider.trim() ? o.provider.trim() : undefined,
     });
   });
   return out;

@@ -29,13 +29,21 @@
   ],
   "video": [
     {
-      "id": "video-1",
-      "name": "Agnes Video 2.5 Flash（M1 预留，M0 无 UI 入口）",
+      "id": "agnes-video-2.5-flash",
+      "name": "Agnes Video 2.5 Flash（限时免费）",
       "baseURL": "https://apihub.agnes-ai.com/v1",
       "apiKey": "sk-你的key",
       "model": "agnes-video-2.5-flash",
       "endpoint": "/videos",
-      "mode": "取值见服务商文档（该平台必填，缺失时 /api/video 会报 MODE_MISSING）"
+      "provider": "agnes"
+    },
+    {
+      "id": "video-generic",
+      "name": "其它 OpenAI Videos 兼容服务（兜底适配器）",
+      "baseURL": "https://某视频服务商/v1",
+      "apiKey": "sk-你的key",
+      "model": "模型名",
+      "provider": "openai"
     }
   ]
 }

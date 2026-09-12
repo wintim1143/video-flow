@@ -1,38 +1,50 @@
 import { resolveProfile, type LlmProfile } from "./llm-configs";
+import { appendTrace, newTraceId } from "./trace-log";
+import {
+  checkVideoGate,
+  markVideoCall,
+  videoCreateMinIntervalMs,
+  videoQueryMinIntervalMs,
+  type VideoCallKind,
+} from "./video-rate-limit";
+import { resolveVideoProvider } from "./video-providers";
+import {
+  VideoError,
+  type VideoCreateResult,
+  type VideoQueryResult,
+  type VideoTaskRequest,
+} from "./video-types";
+
+export { VideoError };
+export { listProviders, resolveVideoProvider } from "./video-providers";
+export { videoGateSnapshot, videoCreateMinIntervalMs, videoQueryMinIntervalMs } from "./video-rate-limit";
+export type {
+  VideoCreateResult,
+  VideoErrorCode,
+  VideoProvider,
+  VideoQueryResult,
+  VideoTaskRequest,
+  VideoTaskStatus,
+} from "./video-types";
 
 /**
- * 视频生成客户端（M1 接线层）。
+ * 视频生成 facade —— **唯一**对外的调用面。
  *
- * 现状：M0 承诺「不生视频」，因此**没有 UI 入口**，只把视频 profile 接到代码里，
- * 供 M1 或脚本直接调用。
+ * 职责：取 profile → 选适配器 → 过限流闸门 → 发请求 → 交给适配器解析 → 记 trace。
+ * 这里不含任何厂商字段名；厂商差异全在 `video-providers.ts`。
  *
- * 各平台参数命名不一（Agnes Video 要求必填 `mode`，取值随平台/模式而变），
- * 所以本层不做任何猜测：`mode` 只从配置（llm.config.json 的 video profile `mode` 字段）
- * 或调用方显式传入，缺失时直接给出可操作的报错，而不是硬编码一个可能错的值。
+ * 与文本/图片链路的关键区别：视频是**异步任务**，一次「生成」= 建任务 + N 次查询。
+ * 但两侧配额**量级完全不同**：建任务吃生成配额（免费档 1 次/分钟），查询宽松得多
+ * （上游实测 3s 间隔可长期稳定；2s 会周期性撞 429）。所以闸门按调用类型分开：
+ * `create` 60s，`query` 3s —— 两者绝不可共用，否则刚建完任务就得干等一分钟才拿得到结果。
  */
 
-export type VideoErrorCode = "CONFIG_MISSING" | "MODE_MISSING" | "UPSTREAM";
+const DEFAULT_TIMEOUT_MS = 300_000;
 
-export class VideoError extends Error {
-  code: VideoErrorCode;
-  detail?: string;
-  status?: number;
-  constructor(code: VideoErrorCode, message: string, detail?: string, status?: number) {
-    super(message);
-    this.code = code;
-    this.detail = detail;
-    this.status = status;
-  }
-}
-
-export interface VideoGenInput {
-  prompt: string;
-  /** 图生视频的首帧（data URL 或 http URL） */
-  imageUrl?: string;
-  /** 覆盖 profile.mode 的取值 */
-  mode?: string;
-  /** 透传给上游的可选参数（duration / resolution / aspect_ratio / seed…，各平台命名不同） */
-  extra?: Record<string, unknown>;
+function videoTimeoutMs(override?: number): number {
+  if (override !== undefined) return override;
+  const env = Number(process.env.VIDEO_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
+  return Number.isFinite(env) && env > 0 ? env : DEFAULT_TIMEOUT_MS;
 }
 
 /** 取视频 profile；未配置抛 CONFIG_MISSING */
@@ -41,77 +53,163 @@ export function getVideoProfile(profileId?: string): LlmProfile {
   if (!p) {
     throw new VideoError(
       "CONFIG_MISSING",
-      "未配置视频 LLM。请在项目根 llm.config.json 的 video 组填入 profile（baseURL / apiKey / model，必要时补 endpoint 与 mode）。"
+      "未配置视频 LLM。请在项目根 llm.config.json 的 video 组填入 profile（baseURL / apiKey / model，建议补 provider）。"
     );
   }
   return p;
 }
 
-/**
- * 纯函数：组装视频生成请求体（不发网络请求，便于单测）。
- * 必填：model + prompt + mode；有首帧图时带 image。
- */
-export function buildVideoBody(profile: LlmProfile, input: VideoGenInput): Record<string, unknown> {
-  const mode = input.mode?.trim() || profile.mode;
-  if (!mode) {
+/** 解析 Retry-After（支持秒数或 HTTP 日期两种写法） */
+function parseRetryAfterMs(res: Response): number | undefined {
+  const h = res.headers.get("retry-after");
+  if (!h) return undefined;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return Math.max(0, Math.round(secs * 1000));
+  const at = Date.parse(h);
+  if (Number.isFinite(at)) return Math.max(0, at - Date.now());
+  return undefined;
+}
+
+interface CallParams {
+  profile: LlmProfile;
+  step: "video.create" | "video.query";
+  url: string;
+  init: RequestInit;
+  timeoutMs: number;
+  /** 写进 trace 的 user 字段（即请求摘要，非完整 prompt 时截断） */
+  summary: string;
+  /** prompt 里是否带图（trace 的 hasImage 标记） */
+  hasImage: boolean;
+}
+
+/** 过闸门 → 发请求 → 解析 JSON → 记 trace。所有上游交互的唯一出口 */
+async function callProvider(p: CallParams): Promise<{ raw: unknown; ms: number }> {
+  /* 只有建任务消耗生成配额；查询走独立的宽松闸门 */
+  const kind: VideoCallKind = p.step === "video.create" ? "create" : "query";
+  const gate = checkVideoGate(kind);
+  if (!gate.ok) {
+    const what = kind === "create" ? "生成视频" : "查询任务";
     throw new VideoError(
-      "MODE_MISSING",
-      `视频 profile「${profile.name}」缺少 mode 取值。请在 llm.config.json 的该 profile 里补 "mode" 字段（取值见服务商文档，如 Agnes Video 的请求示例），或在请求里显式传 mode。`
+      "THROTTLED",
+      `${what}过于频繁：本地最小间隔 ${Math.round(
+        (kind === "create" ? videoCreateMinIntervalMs() : videoQueryMinIntervalMs()) / 1000
+      )}s，还需等待 ${Math.ceil(gate.retryAfterMs / 1000)}s。`,
+      undefined,
+      429,
+      gate.retryAfterMs
     );
   }
-  const body: Record<string, unknown> = { model: profile.model, prompt: input.prompt, mode };
-  if (input.imageUrl) body.image = input.imageUrl;
-  if (input.extra) {
-    for (const [k, v] of Object.entries(input.extra)) {
-      if (v !== undefined && k !== "model" && k !== "prompt" && k !== "mode") body[k] = v;
-    }
-  }
-  return body;
-}
+  markVideoCall(kind);
 
-export interface VideoGenResult {
-  /** 上游返回的 JSON（同步出片或异步任务，形态随平台而定，原样透出） */
-  raw: unknown;
-  ms: number;
-  mode: string;
-}
+  const traceId = newTraceId();
+  const base = {
+    traceId,
+    step: p.step,
+    model: p.profile.model,
+    profileId: p.profile.id,
+    profileName: p.profile.name,
+    temperature: 0,
+    hasImage: p.hasImage,
+    attempts: 1,
+    degraded: [] as string[],
+    system: "",
+    user: p.summary.slice(0, 4000),
+  };
 
-/** 调一次视频生成（POST {baseURL}{endpoint ?? "/videos"}） */
-export async function generateVideo(
-  input: VideoGenInput & { profileId?: string; timeoutMs?: number }
-): Promise<VideoGenResult> {
-  const profile = getVideoProfile(input.profileId);
-  const body = buildVideoBody(profile, input);
-  const timeoutMs = input.timeoutMs ?? Number(process.env.VIDEO_TIMEOUT_MS ?? 300_000);
-  const endpoint = profile.endpoint || "/videos";
   const started = performance.now();
-
   let res: Response;
   try {
-    res = await fetch(`${profile.baseURL}${endpoint}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${profile.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    res = await fetch(p.url, { ...p.init, signal: AbortSignal.timeout(p.timeoutMs) });
   } catch (err) {
-    throw new VideoError("UPSTREAM", `无法连接视频服务（${profile.baseURL}）`, String(err).slice(0, 500));
+    const latencyMs = Math.round(performance.now() - started);
+    appendTrace({ ...base, ok: false, latencyMs, error: String(err).slice(0, 300) });
+    throw new VideoError("UPSTREAM", `无法连接视频服务（${p.profile.baseURL}）`, String(err).slice(0, 500));
   }
 
   const text = await res.text().catch(() => "");
+  const latencyMs = Math.round(performance.now() - started);
+
   if (!res.ok) {
-    throw new VideoError("UPSTREAM", `视频服务返回 ${res.status}`, text.slice(0, 800), res.status);
+    appendTrace({ ...base, ok: false, latencyMs, error: `${res.status} ${text.slice(0, 300)}`, raw: text.slice(0, 4000) });
+    /* 429：优先用上游给的 Retry-After，没有就退回本类调用的本地最小间隔 */
+    const fallbackMs = kind === "create" ? videoCreateMinIntervalMs() : videoQueryMinIntervalMs();
+    const retryAfterMs = res.status === 429 ? parseRetryAfterMs(res) ?? fallbackMs : undefined;
+    throw new VideoError("UPSTREAM", `视频服务返回 ${res.status}`, text.slice(0, 800), res.status, retryAfterMs);
   }
 
   let raw: unknown;
   try {
     raw = text ? JSON.parse(text) : null;
   } catch {
-    // 有的平台直接回 URL 文本，不做 JSON 强解析
+    /* 有的平台直接回 URL 文本，不做 JSON 强解析 */
     raw = text;
   }
-  return { raw, ms: Math.round(performance.now() - started), mode: String(body.mode) };
+  appendTrace({ ...base, ok: true, latencyMs, raw: text.slice(0, 4000) });
+  return { raw, ms: latencyMs };
+}
+
+/** 建任务。返回的 `taskId` 用于后续查询 */
+export async function createVideoTask(
+  input: VideoTaskRequest & { profileId?: string; timeoutMs?: number }
+): Promise<VideoCreateResult> {
+  const profile = getVideoProfile(input.profileId);
+  const provider = resolveVideoProvider(profile);
+  const { url, body } = provider.buildCreate(profile, input);
+
+  const { raw, ms } = await callProvider({
+    profile,
+    step: "video.create",
+    url,
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${profile.apiKey}` },
+      body: JSON.stringify(body),
+    },
+    timeoutMs: videoTimeoutMs(input.timeoutMs),
+    summary: JSON.stringify(body),
+    hasImage: Boolean(input.firstFrame || input.lastFrame || input.images?.length),
+  });
+
+  const parsed = provider.parseCreate(raw);
+  if (!parsed.taskId) {
+    throw new VideoError(
+      "UPSTREAM",
+      "上游未返回可用于查询的任务 ID（Agnes 应为 video_id）。",
+      JSON.stringify(raw).slice(0, 500)
+    );
+  }
+  return {
+    taskId: parsed.taskId,
+    upstreamId: parsed.upstreamId,
+    status: parsed.status,
+    progress: parsed.progress,
+    provider: provider.id,
+    mode: typeof body.mode === "string" ? body.mode : undefined,
+    ms,
+    raw,
+  };
+}
+
+/** 查询任务。`status === "completed"` 时 `videoUrl` 才可信 */
+export async function queryVideoTask(input: {
+  taskId: string;
+  profileId?: string;
+  timeoutMs?: number;
+}): Promise<VideoQueryResult> {
+  const profile = getVideoProfile(input.profileId);
+  const provider = resolveVideoProvider(profile);
+  const url = provider.buildQuery(profile, input.taskId);
+
+  const { raw, ms } = await callProvider({
+    profile,
+    step: "video.query",
+    url,
+    init: { method: "GET", headers: { Authorization: `Bearer ${profile.apiKey}` } },
+    timeoutMs: videoTimeoutMs(input.timeoutMs),
+    summary: url,
+    hasImage: false,
+  });
+
+  const parsed = provider.parseQuery(raw);
+  return { ...parsed, ms, raw };
 }

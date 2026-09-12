@@ -3,8 +3,11 @@
 import { useState } from "react";
 import type { Shot } from "@/lib/schema";
 import { formatTimecode } from "@/lib/schema";
+import type { CreateVideoPayload, VideoTaskUi } from "@/lib/use-video-tasks";
 import { CopyButton } from "./CopyButton";
 import { EditableText } from "./EditableText";
+import { KeyframeBar } from "./KeyframeBar";
+import { VideoGenBar } from "./VideoGenBar";
 
 type Lang = "en" | "cn";
 
@@ -142,6 +145,18 @@ export function ShotRow({
   globalNegative,
   globalNegativeCn,
   onShot,
+  videoEnabled = false,
+  videoTask,
+  videoBusy = false,
+  videoCreateReadyAt = 0,
+  keyframeEnabled = false,
+  keyframeBusy = false,
+  keyframeError,
+  onCreateVideo,
+  onRemoveVideo,
+  onRefreshVideo,
+  onGenerateKeyframe,
+  onClearKeyframe,
 }: {
   shot: Shot;
   /** 画幅（来自分镜 meta），复制视频 prompt 时作为前置说明 */
@@ -149,6 +164,22 @@ export function ShotRow({
   globalNegative: string;
   globalNegativeCn?: string;
   onShot: (next: Shot) => void;
+  /** 是否已配置视频 LLM；未配置时本行不出现生成入口 */
+  videoEnabled?: boolean;
+  /** 本镜的视频任务状态（由页面级的单一轮询器驱动） */
+  videoTask?: VideoTaskUi;
+  videoBusy?: boolean;
+  /** 生成配额的全局冷却结束时间戳（账户级，所有分镜共用同一个冷却） */
+  videoCreateReadyAt?: number;
+  /** 是否已配置图片 LLM（闸门 2 关键帧的开关） */
+  keyframeEnabled?: boolean;
+  keyframeBusy?: boolean;
+  keyframeError?: string;
+  onCreateVideo?: (payload: CreateVideoPayload) => void;
+  onRemoveVideo?: () => void;
+  onRefreshVideo?: () => void;
+  onGenerateKeyframe?: (prompt: string) => void;
+  onClearKeyframe?: () => void;
 }) {
   const [lang, setLang] = useState<Lang>("en");
   const negEn = [globalNegative, shot.negative_prompt].filter(Boolean).join(", ");
@@ -245,6 +276,27 @@ export function ShotRow({
               />
             )}
           </div>
+          <KeyframeBar
+            shot={shot}
+            aspectRatio={aspectRatio}
+            enabled={keyframeEnabled}
+            busy={keyframeBusy}
+            error={keyframeError}
+            onGenerate={(prompt) => onGenerateKeyframe?.(prompt)}
+            onClear={() => onClearKeyframe?.()}
+          />
+          <VideoGenBar
+            shot={shot}
+            aspectRatio={aspectRatio}
+            globalNegative={globalNegative}
+            task={videoTask}
+            enabled={videoEnabled}
+            disabled={videoBusy}
+            createReadyAt={videoCreateReadyAt}
+            onCreate={(payload) => onCreateVideo?.(payload)}
+            onRemove={() => onRemoveVideo?.()}
+            onRefresh={() => onRefreshVideo?.()}
+          />
         </div>
       </div>
     </div>

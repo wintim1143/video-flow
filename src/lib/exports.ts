@@ -25,6 +25,22 @@ export function allVideoPrompts(storyboard: Storyboard, globalNegative: string):
   );
 }
 
+/**
+ * 单镜视频 prompt：真正投喂视频模型的那一条 ——
+ * 运动描述 + 节拍时间轴 + 状态链 + 负面词。
+ * 与 allVideoPrompts（批量导出给人看）和 wholeVideoPrompt（整片单 prompt）互补。
+ */
+export function shotVideoPrompt(s: Shot, globalNegative: string): string {
+  const neg = [globalNegative, s.negative_prompt].filter(Boolean).join(", ");
+  const parts = [s.video_prompt.trim()];
+  if (s.beats?.length) parts.push(`Beats: ${s.beats.join(" | ")}`);
+  if (s.start_state || s.end_state) {
+    parts.push(`State: ${[s.start_state, s.end_state].filter(Boolean).join(" → ")}`);
+  }
+  if (neg) parts.push(`Avoid: ${neg}`);
+  return parts.filter(Boolean).join("\n");
+}
+
 function shotMd(s: Shot, globalNegative: string): string {
   const lines = [
     `### Shot ${s.index} · ${formatTimecode(s.start)} → ${formatTimecode(s.start + s.duration)} · ${s.duration}s · ${s.shot_type} · ${s.camera_movement}`,

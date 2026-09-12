@@ -6,6 +6,8 @@ import { ASPECT_LABEL, formatTimecode } from "@/lib/schema";
 import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown, wholeVideoPrompt } from "@/lib/exports";
 import { suggestShotCount } from "@/lib/prompts";
 import type { LlmConfigsResponse, LlmProfileSafe } from "@/lib/llm-types";
+import { useVideoTasks, type CreateVideoPayload } from "@/lib/use-video-tasks";
+import { keyframeSizeFor, useKeyframes } from "@/lib/use-keyframes";
 import { StyleEditor } from "@/components/StyleEditor";
 import { StyleTestImage } from "@/components/StyleTestImage";
 import { Timeline } from "@/components/Timeline";
@@ -64,6 +66,7 @@ interface Persisted {
   tab: Tab;
   textProfileId: string;
   imageProfileId: string;
+  videoProfileId: string;
 }
 
 function download(filename: string, content: string, type: string) {
@@ -107,8 +110,8 @@ export default function Page() {
   const [tab, setTab] = useState<Tab>("input");
   const [brief, setBrief] = useState("");
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>("9:16");
-  const [targetDuration, setTargetDuration] = useState(30);
-  const [shotCount, setShotCount] = useState(suggestShotCount(30));
+  const [targetDuration, setTargetDuration] = useState(DEFAULT_DURATION);
+  const [shotCount, setShotCount] = useState(() => suggestShotCount(DEFAULT_DURATION));
   const [adjustNote, setAdjustNote] = useState("");
 
   const [style, setStyle] = useState<StyleSpec | null>(null);
@@ -138,6 +141,31 @@ export default function Page() {
   const [profiles, setProfiles] = useState<LlmConfigsResponse>({ text: [], image: [], video: [] });
   const [textProfileId, setTextProfileId] = useState("");
   const [imageProfileId, setImageProfileId] = useState("");
+  const [videoProfileId, setVideoProfileId] = useState("");
+
+  /* ── 视频任务：状态 + 全局单一轮询器（查询按 1–2s，生成配额另有全局冷却） ── */
+  const {
+    tasks: videoTasks,
+    create: createVideoTask,
+    remove: removeVideoTask,
+    clearAll: clearVideoTasks,
+    refreshNow: refreshVideoTask,
+    createReadyAt: videoCreateReadyAt,
+    error: videoError,
+    setError: setVideoError,
+    busy: videoBusy,
+  } = useVideoTasks();
+
+  /* ── 闸门 2：关键帧（串行队列，逐镜出一张首帧图 → 供 I2V 使用） ── */
+  const {
+    busy: keyframeBusyMap,
+    errors: keyframeErrorMap,
+    pending: keyframePending,
+    anyBusy: keyframeAnyBusy,
+    generate: generateKeyframe,
+    generateMany: generateKeyframes,
+    clearError: clearKeyframeError,
+  } = useKeyframes();
 
   /* ── 本地持久化：挂载后恢复一次 → 之后每次变更防抖写回 ──
    * 只在 useEffect 里读写，保证 SSR 首屏与客户端首帧一致（不产生 hydration 警告）。 */
@@ -163,6 +191,7 @@ export default function Page() {
         if (s.outline) setOutline(s.outline);
         if (typeof s.textProfileId === "string") setTextProfileId(s.textProfileId);
         if (typeof s.imageProfileId === "string") setImageProfileId(s.imageProfileId);
+        if (typeof s.videoProfileId === "string") setVideoProfileId(s.videoProfileId);
         // 只在对应数据确实存在时才恢复到该 tab，避免落到被禁用的空 tab
         if (s.tab === "input" || (s.tab === "style" && s.style) || (s.tab === "shots" && s.shots?.length)) {
           setTab(s.tab);
@@ -193,6 +222,7 @@ export default function Page() {
           tab,
           textProfileId,
           imageProfileId,
+          videoProfileId,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       } catch {
@@ -216,6 +246,7 @@ export default function Page() {
     tab,
     textProfileId,
     imageProfileId,
+    videoProfileId,
   ]);
 
   /** 清空本地保存的工作进度（回到全新会话） */
@@ -244,10 +275,12 @@ export default function Page() {
     setRefImage(null);
     setError(null);
     setProgress({ phase: "", done: 0, total: 0, last: "" });
+    clearVideoTasks();
+    setVideoError(null);
     setTargetDuration(DEFAULT_DURATION);
     setShotCount(suggestShotCount(DEFAULT_DURATION));
     setTab("input");
-  }, [clearPersisted]);
+  }, [clearPersisted, clearVideoTasks, setVideoError]);
 
   useEffect(() => {
     fetch("/api/llm-configs")
@@ -259,6 +292,7 @@ export default function Page() {
         // 默认选中第一个
         setTextProfileId((prev) => (prev && data.text.some((p) => p.id === prev) ? prev : (data.text[0]?.id ?? "")));
         setImageProfileId((prev) => (prev && data.image.some((p) => p.id === prev) ? prev : (data.image[0]?.id ?? "")));
+        setVideoProfileId((prev) => (prev && data.video.some((p) => p.id === prev) ? prev : (data.video[0]?.id ?? "")));
       })
       .catch(() => {
         /* 配置读取失败不阻塞页面，生成时会报具体错误 */
@@ -286,6 +320,75 @@ export default function Page() {
     { key: "style", label: "② 风格", disabled: !canStyle },
     { key: "shots", label: "③ 分镜", disabled: !canShots },
   ];
+
+  /* ── 视频生成：只有配了 video profile 才出现入口 ── */
+  const videoEnabled = profiles.video.length > 0;
+
+  const handleCreateVideo = useCallback(
+    (index: number, payload: CreateVideoPayload) => {
+      setVideoError(null);
+      void createVideoTask(index, { ...payload, profileId: videoProfileId || undefined });
+    },
+    [createVideoTask, videoProfileId, setVideoError]
+  );
+
+  /* ── 闸门 2：关键帧。生成成功即写回 Shot，之后 buildPayload 自动带上 first_frame ── */
+  const keyframeEnabled = profiles.image.length > 0;
+  /* 用顶层的 aspectRatio 状态算尺寸（storyboard 在本函数体后面才声明，不能提前引用） */
+  const kfSize = keyframeSizeFor(aspectRatio);
+
+  const handleGenerateKeyframe = useCallback(
+    async (index: number, prompt: string) => {
+      const url = await generateKeyframe(index, {
+        prompt,
+        profileId: imageProfileId || undefined,
+        size: kfSize,
+      });
+      if (!url) return;
+      setShots((prev) =>
+        prev
+          ? prev.map((s) => (s.index === index ? { ...s, keyframe_url: url, keyframe_prompt_used: prompt } : s))
+          : prev
+      );
+    },
+    [generateKeyframe, imageProfileId, kfSize]
+  );
+
+  const handleClearKeyframe = useCallback((index: number) => {
+    clearKeyframeError(index);
+    setShots((prev) =>
+      prev
+        ? prev.map((s) => (s.index === index ? { ...s, keyframe_url: "", keyframe_prompt_used: "" } : s))
+        : prev
+    );
+  }, [clearKeyframeError]);
+
+  /** 一键生成全部关键帧：串行逐张，避免并发打爆图接口 */
+  const handleGenerateAllKeyframes = useCallback(async () => {
+    if (!shots?.length) return;
+    const items = shots.map((s) => ({
+      index: s.index,
+      req: {
+        prompt: s.image_prompt || s.video_prompt,
+        profileId: imageProfileId || undefined,
+        size: kfSize,
+      },
+    }));
+    const done = await generateKeyframes(items);
+    if (!done.size) return;
+    setShots((prev) =>
+      prev
+        ? prev.map((s) =>
+            done.has(s.index)
+              ? { ...s, keyframe_url: done.get(s.index)!, keyframe_prompt_used: s.image_prompt || s.video_prompt }
+              : s
+          )
+        : prev
+    );
+  }, [shots, generateKeyframes, imageProfileId, kfSize]);
+
+  /** 已就位的关键帧数量（面板进度用） */
+  const keyframeDone = (shots ?? []).filter((s) => s.keyframe_url).length;
 
   const switchTab = useCallback(
     (k: Tab) => {
@@ -948,6 +1051,94 @@ export default function Page() {
             </div>
           ) : null}
 
+          {/* ── 视频生成：全局设置（profile 选择 + 配额说明 + 错误提示） ── */}
+          {keyframeEnabled && shots?.length ? (
+            <div className="panel p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[13px] font-semibold">闸门 2 · 关键帧</span>
+                <span className="text-[11.5px] text-[var(--muted)]">
+                  先给每镜出一张首帧图，再走图生视频 —— 首帧锁住主体外观与构图，跨镜一致性才有锚点
+                </span>
+                <span className="chip mono text-[11px]">
+                  {keyframeDone} / {shots.length} 已就位
+                </span>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className="text-[12px] text-[var(--muted)]">图片 LLM</span>
+                <select
+                  className="field mono w-64"
+                  value={imageProfileId}
+                  onChange={(e) => setImageProfileId(e.target.value)}
+                >
+                  {profiles.image.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="chip mono text-[11px]">{kfSize}</span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={keyframeAnyBusy}
+                  onClick={() => void handleGenerateAllKeyframes()}
+                >
+                  {keyframeAnyBusy ? `生成中… 还有 ${keyframePending} 张` : `一键生成全部关键帧（${shots.length} 镜）`}
+                </button>
+              </div>
+              <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--muted)]">
+                串行逐张生成（并发会被图接口限流）。首帧图会作为 <code className="mono text-[var(--text)]">first_frame</code>{" "}
+                传给视频接口，视频自动切到 <code className="mono text-[var(--text)]">keyframe</code> 模式；未生成首帧的分镜仍可走纯文生视频。
+              </div>
+            </div>
+          ) : null}
+
+          <div className="panel p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[13px] font-semibold">视频生成</span>
+              <span className="text-[11.5px] text-[var(--muted)]">
+                异步任务：点分镜里的「生成视频」建任务，之后由服务端按配额自动轮询查询
+              </span>
+            </div>
+            {videoEnabled ? (
+              <>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="text-[12px] text-[var(--muted)]">视频 LLM</span>
+                  <select
+                    className="field mono w-64"
+                    value={videoProfileId}
+                    onChange={(e) => setVideoProfileId(e.target.value)}
+                  >
+                    {profiles.video.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="chip mono text-[11px]">
+                    {profiles.video.find((p) => p.id === videoProfileId)?.provider ?? "—"}
+                  </span>
+                </div>
+                <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--muted)]">
+                  <strong>生成</strong>受配额限制（免费档约 1 次/分钟，全账户共用，所以所有分镜的按钮会一起冷却）；
+                  <strong>查询</strong>不受限，建完任务后 1–2 秒就能开始看到进度。
+                </div>
+                {videoError ? (
+                  <div className="mt-2 text-[12px]" style={{ color: "var(--err)" }}>
+                    {videoError}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-2 rounded-md border border-[var(--border)] bg-[var(--panel-2)] p-3 text-[12.5px] leading-relaxed text-[var(--muted)]">
+                尚未配置视频 LLM。在项目根目录 <code className="mono text-[var(--text)]">llm.config.json</code> 的{" "}
+                <code className="mono text-[var(--text)]">video</code> 组加入一条 profile
+                （baseURL / apiKey / model，建议补 <code className="mono text-[var(--text)]">provider</code>
+                ，Agnes 用 <code className="mono text-[var(--text)]">&quot;agnes&quot;</code>），保存后刷新页面。
+              </div>
+            )}
+          </div>
+
           <Timeline
             shots={storyboard.shots}
             onPick={(i) =>
@@ -963,6 +1154,18 @@ export default function Page() {
               globalNegative={globalNegative}
               globalNegativeCn={globalNegativeCn}
               onShot={(next) => patchShot(s.index, next)}
+              videoEnabled={videoEnabled}
+              videoTask={videoTasks[s.index]}
+              videoBusy={videoBusy}
+              videoCreateReadyAt={videoCreateReadyAt}
+              keyframeEnabled={keyframeEnabled}
+              keyframeBusy={keyframeBusyMap[s.index] ?? false}
+              keyframeError={keyframeErrorMap[s.index]}
+              onCreateVideo={(payload) => handleCreateVideo(s.index, payload)}
+              onRemoveVideo={() => removeVideoTask(s.index)}
+              onRefreshVideo={() => refreshVideoTask(s.index)}
+              onGenerateKeyframe={(prompt) => void handleGenerateKeyframe(s.index, prompt)}
+              onClearKeyframe={() => handleClearKeyframe(s.index)}
             />
           ))}
 

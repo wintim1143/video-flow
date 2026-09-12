@@ -38,7 +38,7 @@ npm test             # vitest，74+ 例，纯 lib 层、无数据库、不耗 LL
     { "id": "img1", "name": "某生图服务", "baseURL": "https://生图服务商/v1", "apiKey": "sk-xxx", "model": "模型名", "endpoint": "/images/generations" }
   ],
   "video": [
-    { "id": "agnes", "name": "Agnes Video 2.5 Flash", "baseURL": "https://apihub.agnes-ai.com/v1", "apiKey": "sk-xxx", "model": "agnes-video-2.5-flash", "endpoint": "/videos", "mode": "见服务商文档" }
+    { "id": "agnes", "name": "Agnes Video 2.5 Flash", "baseURL": "https://apihub.agnes-ai.com/v1", "apiKey": "sk-xxx", "model": "agnes-video-2.5-flash", "endpoint": "/videos", "provider": "agnes" }
   ]
 }
 ```
@@ -46,8 +46,8 @@ npm test             # vitest，74+ 例，纯 lib 层、无数据库、不耗 LL
 - **text**：数组，可配多个。顶栏「文本LLM」下拉随时切换，风格 / 分镜生成共用当前选中项。`name` 缺省用 `model`；`id` 缺省自动生成。
   - `reasoningEffort` 可选（`minimal`/`low`/`high`，设 `""` 关闭）：推理模型（如 gpt-5.6 系）默认 `minimal`，实测把单镜耗时从 ~120s 降到 ~19s；服务商不支持时自动剥离该参数。
   - `vision` 可选：**缺省 = 支持图片输入**；填 `false` 表示纯文本模型（如 DeepSeek），上传参考图提取风格时前端下拉会自动过滤掉它、服务端返回 `VISION_UNSUPPORTED`。
-- **image**：配置后才在 ② 风格 tab 出现「生成风格样张」区块 —— 用当前风格（含你编辑后的色板/关键词）出一张测试图，确认视觉方向是否满意；`endpoint` 缺省 `/images/generations`（OpenAI Images 协议）。
-- **video**：**M0 页面没有生视频入口**（M0 承诺不生视频，不会误触产生费用）。配置已接到代码里：`GET /api/video` 可查看接线状态（是否配好 `mode`），`POST /api/video` 可透传一次生成请求供脚本 / M1 调用。`mode` 是各平台必填项、取值各异，因此不从代码硬编码，缺配置时明确报 `MODE_MISSING` 并指向文档。
+- **image**：配置后才在 ② 风格 tab 出现「生成风格样张」区块 —— 用当前风格（含你编辑后的色板/关键词）出一张测试图，确认视觉方向是否满意；`endpoint` 缺省 `/images/generations`（OpenAI Images 协议）。同一接口也服务 ③ 分镜的关键帧生成，只是多传两个参数：`size` 按画幅（如 `720x1280`，**不限枚举**）与 `preferUrl: true`（要**公网 URL** 而非 base64 —— I2V 读不了 b64）。
+- **video**：配置后在 ③ 分镜 tab 出现「视频生成」区块，每个分镜内多一条「生成关键帧 → 生成视频」两步链路（见「关键帧 → I2V」一节）—— 异步任务：建任务 → 服务端按配额轮询 → 出片后内联播放 / 下载。`provider` 选择厂商适配器（见下一节），缺省按 `baseURL` 推断；`mode` 通常不用填，适配器会按实际传入的媒体字段推断（有首尾帧 → `keyframe`，有参考图/音频 → `reference`，否则 `text`）。
 - 配置文件存在时**优先于** `.env.local`；无此文件 / 非法 JSON 自动回退 `.env.local` 单文本配置（`LLM_REASONING_EFFORT` 环境变量可覆盖回退配置的思考力度）。
 - ⚠️ **key 只能写在 `llm.config.json`（已被 gitignore）或 `.env.local`，`llm.config.example.json` 是模板、会被提交，切勿填真实 key。**
 
@@ -111,6 +111,80 @@ npm test             # vitest，74+ 例，纯 lib 层、无数据库、不耗 LL
 
 按镜序**串行**生成视频 → 每镜生成后截取**最后一帧** → 下一镜用该帧作为首帧参考（图生视频），两镜动势即可无缝衔接；换场镜按各镜标注的转场方式拼接。Markdown 导出里也带这段说明。
 
+## 视频生成：可插拔厂商适配器
+
+视频接口**没有事实标准**——不同厂商的创建路径、查询路径、字段命名、时长类型、成片地址位置全都不同。以 Agnes 为例（一手核对官方文档）：
+
+| 维度 | Agnes Video 2.5 / Flash |
+|---|---|
+| 创建 | `POST {baseURL}/videos` |
+| 查询 | `GET {origin}/agnesapi?video_id=&model_name=` —— **跳出 `/v1` 命名空间** |
+| 时长 | `seconds`，**字符串** `"4"`–`"12"` |
+| 分辨率 | `size`，**档位** `"720P"`（不是 `1280x720`） |
+| 画幅 | `aspect_ratio`，与 `size` 正交 |
+| 模式 | `mode` **必填**：`text` / `keyframe` / `reference`，且必须与实际媒体字段匹配 |
+| 首帧 | `first_frame` / `last_frame`（不是 `image` / `input_reference`） |
+| 成片地址 | `metadata.url`，且仅 `status: "completed"` 时可信 |
+
+Agnes 文档还专门列出会返回 400 的**别名清单**（`input_reference`、`video_url`、`width` / `height` / `fps`）——说明这些命名在别家那里是合法的。所以差异必须靠适配器吸收：
+
+```
+VideoTaskRequest（统一入参：prompt / seconds / aspectRatio / firstFrame / images…）
+        ↓  resolveVideoProvider(profile)
+   ┌────┴─────────────────┐
+ agnes               openai（兜底：POST /videos + GET /videos/{id}）
+ buildCreate / parseCreate / buildQuery / parseQuery / inferMode
+```
+
+- 适配器在 `src/lib/video-providers.ts`；**新增一家厂商 = 写一个 `VideoProvider` 实现 + 注册表登记一行**，路由、UI、类型层都不用改。
+- 选适配器：`profile.provider`（`agnes` / `openai`）；缺省按 `baseURL` 推断（含 `agnes` 走 agnes）。
+- 本地就能拦掉的错误不浪费配额：时长越界、`keyframe` 没给帧、`reference` 没给媒体，都在发请求前抛 `BAD_REQUEST`。
+
+### 关键帧 → I2V（M1 闭环）
+
+分镜里的 `image_prompt` 是**纯静态**描述（无运动词），本来就是为生关键帧写的；直接用运动 prompt 文生视频等于把这半套 prompt 工程浪费掉，出片的主体也更容易漂。所以每镜多一步「先生关键帧，再图生视频」：
+
+```
+Shot.image_prompt ──POST /api/image（preferUrl）──▶ 公网图 URL
+                                                      │
+                         写回 Shot.keyframe_url ──────┘
+                                                      │
+      buildShotVideoPayload() 带上 firstFrame ────────┘
+                                                      ▼
+              POST /api/video → 适配器推断 mode=keyframe → first_frame
+```
+
+- **`preferUrl` 是关键**：I2V 的首帧必须是上游能自己拉取的**公网地址**，base64 字符串它读不了。而网关实测有个坑——传 `response_format: "b64_json"` 时它**不再返回 `url`**，所以 `preferUrl: true` 时**根本不发** `response_format`，直接取默认返回里的 `url`。
+- **首帧尺寸必须与画幅同比例**：`keyframeSizeFor()` 按 `aspect_ratio` 选尺寸（9:16 → `720x1280`，16:9 → `1280x720`）。实测 2:3 首帧（`1024x1536`）会让成片变成 704×1088（画幅被首帧带偏），换成 9:16 首帧后成片是 704×1280 —— 高度对齐文档标称的 720P 竖屏。上游会把边长吸附到 64 的倍数，比例是准的。
+- **串行队列**：`use-keyframes.ts` 逐镜排队生成，避免多镜并发把图接口打爆（与分镜生成同理）。
+- **失败不阻塞**：单镜关键帧失败只标记该镜，不影响其他镜；也可以跳过关键帧直接文生视频（退化为 `mode: "text"`）。
+
+> 边界：关键帧生图走的是 image profile，与视频 profile 是两套配置，都要配好才有完整链路。
+
+### 异步任务：两套限流，量级差 20 倍
+
+一次「生成视频」= **建任务 + N 次查询**。但两侧限流**完全不同**，早期版本把它们合成一把锁，结果建完任务要干等 60 秒才查得到结果（5 秒的视频要一分钟才知道成没成）。现在拆成两个独立闸门：
+
+| 闸门 | 约束对象 | 默认 | 环境变量 | 依据 |
+|---|---|---|---|---|
+| create | 建任务（吃生成配额，**账户级**） | 60s | `VIDEO_CREATE_MIN_INTERVAL_MS` | Agnes 免费档实测 1 次/分钟 |
+| query | 查询（宽松） | 4s | `VIDEO_QUERY_MIN_INTERVAL_MS` | 实测 4.0s×15（整 60s）全 200；2.0s×8 第 4/8 次 429 且 `Retry-After: 2` |
+
+- 服务端统一发牌（`src/lib/video-rate-limit.ts`）：没到点**不发上游请求**，回 `429 THROTTLED + retryAfterMs`。
+- 响应字段也分开了：`nextCreateAfterMs`（多久后才能再生成）与 `nextQueryAfterMs`（多久后能再查），**两个数，别混用**。
+- 前端全局只有**一个**定时器（`src/lib/use-video-tasks.ts`），等待时长完全按服务端返回的 `nextQueryAfterMs`（或上游 `Retry-After`）来排，不自己拍间隔；任务状态持久化到 localStorage，刷新页面轮询链不断。
+- **生成配额是账户级的**，所以 `createReadyAt` 是全局冷却：生成了第 1 镜，其余分镜的「生成视频」按钮会一起变灰倒计时。
+- 上游 429（本地闸门或上游限流）只当作「等一下」重新排期，**绝不判任务失败** —— 否则一次瞬时限流就把还在跑的任务钉死。
+
+> 边界：闸门状态是**模块级内存**，只覆盖单进程。dev server / 单实例部署够用；多实例部署需换成共享计数（替换 `video-rate-limit.ts` 的几个函数即可）。
+> 边界：Agnes 时长下限是 4 秒，短于 4 秒的分镜会被本地拦下并给出提示。
+
+### API
+
+- `POST /api/video` → 建任务，返回 `taskId` / `status` / `provider` / `mode` / `nextCreateAfterMs` / `nextQueryAfterMs`
+- `GET /api/video?taskId=xxx[&profileId=]` → 查询任务；`completed` 时返回 `videoUrl`
+- `GET /api/video` → 能力自述：脱敏 profile 列表 + 命中的适配器 + 闸门快照（`{create, query}`）
+
 ## 链路日志（/logs）
 
 每次 LLM 调用落一条 JSON 到 `.data/traces-YYYY-MM.jsonl`（按月轮转，已被 gitignore），记录：traceId、步骤、模型、**完整 prompt**、原始输出、耗时、token、报错、**降级重试次数与被剥离的参数**、**429/5xx 退避重试次数**。
@@ -162,9 +236,11 @@ src/
     api/image/route.ts       风格样张生图
     api/logs/route.ts        链路日志查询 / 微调 JSONL 导出
     api/llm-configs/route.ts 脱敏的 LLM profile 列表（前端下拉用）
-    api/video/route.ts       视频生成透传端点（M1 预留，M0 无 UI 入口）
+    api/video/route.ts       视频：POST 建任务 / GET 查任务 / GET 能力自述（含厂商与闸门信息）
   components/
-    ShotRow.tsx             单镜分镜卡（中英对照 / 台拍 / 状态链 / 复制前缀）
+    ShotRow.tsx             单镜分镜卡（中英对照 / 节拍 / 状态链 / 复制前缀 / 视频生成条）
+    VideoGenBar.tsx         单镜视频生成条（建任务 / 状态 / 进度 / 内联播放 / 下载）
+    KeyframeBar.tsx         单镜关键帧条（生图 / 预览 / 重生成 / 清除；首帧喂给 I2V）
     Timeline.tsx            时间轴条
     StyleEditor.tsx         风格卡编辑
     StyleTestImage.tsx      风格样张（生图确认）
@@ -177,16 +253,22 @@ src/
     prompts.ts              风格 / 大纲 / 单镜展开的 system+user prompt 与 suggestShotCount
     llm.ts                  OpenAI 兼容调用 + JSON 提取 + 降级重试 + 429/5xx 退避 + trace 埋点
     llm-configs.ts          多 profile 配置层（text/image/video，脱敏输出）
-    exports.ts              Markdown / JSON / 批量 prompt / 整片单 prompt 导出
+    exports.ts              Markdown / JSON / 批量 prompt / 整片单 prompt / 单镜视频 prompt 导出
     text-utils.ts           prompt 文本后处理（整段去重）
     trace-log.ts            链路日志落盘（按月轮转、尾部读取）
-    video.ts                视频生成客户端（mode 从配置读取，不硬编码）
-test/                       vitest 回归测试（schema / prompts / exports / trace-log / llm / text-utils / video）
+    video.ts                视频生成 facade：取 profile → 选适配器 → 过闸门 → 解析 → 记 trace
+    video-types.ts          厂商无关的入参 / 出参 / VideoProvider 接口 / VideoError
+    video-providers.ts      厂商适配器注册表（agnes / openai 兜底）+ 选适配器
+    video-rate-limit.ts     视频限流闸门（create 60s / query 4s，两把独立的锁）
+    use-video-tasks.ts      视频任务状态机 + 全局单一轮询器 + localStorage 持久化
+    use-keyframes.ts        关键帧状态机（串行队列）+ keyframeSizeFor 画幅选尺寸
+    video-payload.ts        buildShotVideoPayload：组装建任务入参（有关键帧则带 firstFrame）
+test/                       vitest 回归测试（schema / prompts / exports / trace-log / llm / text-utils / video / video-providers / keyframe）
 ```
 
 ## 后续里程碑衔接
 
-- **M1**：在 ③ 之后接「关键帧生图 → I2V 生视频 → 预览」，本项目的 `StyleSpec` 与 `Shot.image_prompt` 可直接复用；`lib/video.ts` + `/api/video` 已把视频调用接好（补齐 `mode` 取值即可出片）。
+- **M1**：「关键帧生图 → I2V 生视频 → 预览」闭环**已贯通**（③ 分镜 tab 内每镜「生成关键帧 → 生成视频」，异步任务 + 配额闸门 + 内联播放）。剩余可做：整片拼接（**注意 M1 规格靠 <10s 单镜砍掉拼接，M3 才做满**）、尾帧链自动回填（镜 N 末帧 → 镜 N+1 首帧，`firstFrame` 通路已就绪）。
 - **M3**：多分镜拼接，`consistency_notes` + 状态链即为跨镜一致性锁定的输入。
 - 接 Mastra 时，`/api/style`、`/api/shots` 两个 route 的 prompt 与 schema 可原样搬进 workflow step。
 
@@ -199,6 +281,11 @@ test/                       vitest 回归测试（schema / prompts / exports / t
 | 502 + 429 | 上游限流。已内置 429/5xx 指数退避重试（默认 3 次、尊重 `Retry-After`，可用 `LLM_MAX_ATTEMPTS` 调整）；免费档 1 次/分钟的站点建议改用付费档 |
 | 422「模型输出不是合法 JSON」 | 该模型 JSON 能力弱，换一个模型（建议 gpt-4o 级别及以上） |
 | 504 超时 | 分镜较长，`LLM_TIMEOUT_MS` 默认 180s，可调大 |
+| ③ 分镜 tab 里没有「视频生成」区块 | `llm.config.json` 的 `video` 组为空，或填了但缺 `baseURL`/`apiKey`/`model`（缺任一字段会被整条丢弃） |
+| 生成视频报 429 / 「生成视频过于频繁」 | 生成配额冷却中。免费档约 1 次/分钟且**全账户共用**，所有分镜的按钮会一起倒计时；调 `VIDEO_CREATE_MIN_INTERVAL_MS` 或等提示的秒数 |
+| 查询报 429 / `too many video status queries` | 上游查询侧限流（约 15 次/60s）。已按 `Retry-After` 自动退避、**不判失败**；调大 `VIDEO_QUERY_MIN_INTERVAL_MS`（默认 4s 实测稳定） |
+| 生成视频报「时长超范围」 | Agnes 只接受 4–12 秒，本镜时长不在范围内。改分镜时长或换支持该时长的厂商 |
+| 生成视频报「未知的视频厂商」 | `provider` 字段写错。可选值见 `GET /api/video` 的 `providers` 字段 |
 | 参考图模式下选不到某个模型 | 该 profile 配了 `"vision": false`（纯文本模型），换支持视觉的模型 |
 | 想比较两次生成差异 | 打开 `/logs`，勾选两条记录做左右对比 |
 | 页面状态想清空 | 分镜页右下角「清空进度」（等价于清 localStorage 的 `video-flow:workbench:v1`） |

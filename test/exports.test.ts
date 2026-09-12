@@ -1,9 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown, wholeVideoPrompt } from "@/lib/exports";
+import { allImagePrompts, allVideoPrompts, bundleAll, shotVideoPrompt, toMarkdown, wholeVideoPrompt } from "@/lib/exports";
 import { makeOutline, makeStoryboard, makeStyle } from "./fixtures";
 
 const storyboard = makeStoryboard();
 const style = makeStyle();
+
+describe("shotVideoPrompt", () => {
+  const s = storyboard.shots[0];
+
+  it("拼出投喂视频模型的那一条：运动 + 节拍 + 状态链 + 负面词", () => {
+    const out = shotVideoPrompt(s, storyboard.global_negative);
+    expect(out.split("\n")[0]).toBe(s.video_prompt);
+    expect(out).toContain("Beats: 0-1s: begins slow rotation | 1-2.5s: settles at 45°");
+    expect(out).toContain("State: 口红直立，切面朝向镜头 → 口红旋转至切面朝右 45°");
+    expect(out).toContain("Avoid: watermark, logo, blur");
+  });
+
+  it("没有节拍 / 状态链 / 负面词时就是纯粹的 video_prompt", () => {
+    const out = shotVideoPrompt(
+      { ...s, beats: [], start_state: "", end_state: "", negative_prompt: "" },
+      ""
+    );
+    expect(out).toBe(s.video_prompt);
+  });
+
+  it("负面词叠加全局与本镜（去重前先拼接，保持顺序）", () => {
+    const out = shotVideoPrompt({ ...s, negative_prompt: "" }, "watermark");
+    expect(out).toContain("Avoid: watermark");
+    expect(out).not.toContain("Avoid: watermark, ");
+  });
+});
 
 describe("allVideoPrompts", () => {
   const out = allVideoPrompts(storyboard, storyboard.global_negative);
