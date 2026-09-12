@@ -38,6 +38,16 @@ export function keyframeSizeFor(aspectRatio: string | undefined): string {
   return "720x720";
 }
 
+/**
+ * 单镜关键帧的发起次数上限 —— 对应验收判据 R3.2「闸门 2 确认/重出 ≤2 次」：
+ * 首次 1 次 + 最多 2 次重出 = 3。
+ *
+ * 超限后 `KeyframeBar` 会锁住「重新生成」，需要点「解除限制」显式解禁才能继续。
+ * 这是**软约束**：本地工具里硬锁死会挡住正当的反复打磨，但默认状态必须守住判据，
+ * 否则「闸门 2 人工把关防乱烧」这条设计意图就形同虚设。
+ */
+export const MAX_KEYFRAME_ATTEMPTS = 3;
+
 interface ImageApiData {
   kind: "b64" | "url";
   url?: string;

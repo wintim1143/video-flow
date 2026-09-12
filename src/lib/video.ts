@@ -83,6 +83,13 @@ interface CallParams {
 }
 
 /** 过闸门 → 发请求 → 解析 JSON → 记 trace。所有上游交互的唯一出口 */
+/**
+ * 上游「队列已满」时的建议等待 —— 这不是秒级抖动，要等别的任务腾出位置，
+ * 所以比 429 的退避长得多。实测报文：
+ *   503 {"code":"video_queue_full","message":"video queue is full, please retry later"}
+ */
+const QUEUE_FULL_RETRY_MS = 30_000;
+
 async function callProvider(p: CallParams): Promise<{ raw: unknown; ms: number }> {
   /* 只有建任务消耗生成配额；查询走独立的宽松闸门 */
   const kind: VideoCallKind = p.step === "video.create" ? "create" : "query";
@@ -131,10 +138,28 @@ async function callProvider(p: CallParams): Promise<{ raw: unknown; ms: number }
 
   if (!res.ok) {
     appendTrace({ ...base, ok: false, latencyMs, error: `${res.status} ${text.slice(0, 300)}`, raw: text.slice(0, 4000) });
-    /* 429：优先用上游给的 Retry-After，没有就退回本类调用的本地最小间隔 */
+    /*
+     * 三种非 2xx，处理方式**刻意不同**：
+     *
+     *   429                          → 限流，优先用上游 Retry-After，否则退回本地最小间隔
+     *   503 + video_queue_full       → 免费档**排队**，队列满时上游直接拒绝建任务。
+     *                                  请求本身没错、也不是「等 1 秒就好」——
+     *                                  给一个较长的建议等待，让前端按它排冷却，
+     *                                  而不是当硬失败丢出去，逼用户反复手点。
+     *   其余                          → 如实上报，不猜
+     */
+    const queueFull = res.status === 503 && /video_queue_full/i.test(text);
     const fallbackMs = kind === "create" ? videoCreateMinIntervalMs() : videoQueryMinIntervalMs();
-    const retryAfterMs = res.status === 429 ? parseRetryAfterMs(res) ?? fallbackMs : undefined;
-    throw new VideoError("UPSTREAM", `视频服务返回 ${res.status}`, text.slice(0, 800), res.status, retryAfterMs);
+    const retryAfterMs =
+      res.status === 429
+        ? parseRetryAfterMs(res) ?? fallbackMs
+        : queueFull
+          ? Math.max(parseRetryAfterMs(res) ?? 0, QUEUE_FULL_RETRY_MS)
+          : undefined;
+    const message = queueFull
+      ? "上游视频队列已满（免费档排队中）—— 稍后重试即可，不是请求参数的问题"
+      : `视频服务返回 ${res.status}`;
+    throw new VideoError("UPSTREAM", message, text.slice(0, 800), res.status, retryAfterMs);
   }
 
   let raw: unknown;

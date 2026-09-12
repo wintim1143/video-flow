@@ -77,6 +77,12 @@ export const ShotSchema = z.object({
   keyframe_url: z.string().catch(""),
   /** 生成本关键帧时**实际使用**的 prompt（`image_prompt` 事后可能被编辑，留档便于对比重生成） */
   keyframe_prompt_used: z.string().catch(""),
+  /**
+   * 本镜关键帧的**发起次数**（含首次与每次重出）。R3.2 判据要求闸门 2 的「确认/重出 ≤2 次」，
+   * 即首次 + 最多 2 次重出 = 3。超限后按钮锁住，需显式解禁才能继续 —— 目的是防无意识乱烧配额。
+   * 「清除关键帧」不会重置它（否则一清就绕过了上限）。
+   */
+  keyframe_attempts: z.number().catch(0),
 });
 export type Shot = z.infer<typeof ShotSchema>;
 

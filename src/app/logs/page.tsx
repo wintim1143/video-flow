@@ -28,6 +28,8 @@ interface TraceRecord {
   temperature: number;
   hasImage: boolean;
   attempts: number;
+  /** 因 429/5xx/超时发起的退避重试次数（attempts - 1 通常等于它，但有降级重发时不等） */
+  retries?: number;
   degraded: string[];
   ok: boolean;
   latencyMs: number;
@@ -165,7 +167,7 @@ export default function LogsPage() {
               </div>
               <div className="grid grid-cols-3 gap-2 text-[11.5px] text-[var(--muted)]">
                 <span>温度 {r.temperature}</span>
-                <span>尝试 {r.attempts} 次</span>
+                <span>尝试 {r.attempts} 次{r.retries ? ` · 重试 ${r.retries}` : ""}</span>
                 <span>{r.degraded.length ? `降级: ${r.degraded.join("/")}` : "无降级"}</span>
               </div>
               <details className="mt-2">
@@ -277,7 +279,10 @@ export default function LogsPage() {
             </span>
             <span className="text-[var(--muted)]">{detail.profileName}</span>
             <span className="text-[var(--muted)]">温度 {detail.temperature}</span>
-            <span className="text-[var(--muted)]">尝试 {detail.attempts} 次</span>
+            <span className="text-[var(--muted)]">
+              尝试 {detail.attempts} 次
+              {detail.retries ? ` · 重试 ${detail.retries}` : ""}
+            </span>
             {detail.degraded.length > 0 && <span className="text-[var(--muted)]">降级: {detail.degraded.join(" → ")}</span>}
             <span className="ml-auto text-[var(--muted)]">
               {fmtSec(detail.latencyMs)} · prompt {detail.usage?.prompt_tokens ?? "-"} / completion {detail.usage?.completion_tokens ?? "-"}

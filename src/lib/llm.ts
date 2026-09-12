@@ -24,7 +24,13 @@ export class LLMError extends Error {
   }
 }
 
-/** 上游限流/服务端故障的退避重试次数（含首次尝试）；429/5xx 适用 */
+/**
+ * 上游限流/服务端故障的退避重试次数（**含首次尝试**）；429/5xx/超时适用。
+ *
+ * 默认 3 = **重试 2 次**，正好对应验收判据 R5.1「每自动环节重试 ≤2 次」。
+ * 别把它读成「重试 3 次」—— 变量名是 attempts 不是 retries，口径在这里钉死。
+ * 用尽后仍失败时，抛出去的 message 会带上「已重试 N 次」（R5.1 要求的超限告警）。
+ */
 const MAX_ATTEMPTS = Math.max(1, Number(process.env.LLM_MAX_ATTEMPTS ?? 3));
 /** 退避基数（毫秒），按 2^wave 递增并封顶 */
 const RETRY_BASE_MS = Math.max(0, Number(process.env.LLM_RETRY_BASE_MS ?? 800));
@@ -336,6 +342,16 @@ export async function chatJSON<T>(params: {
       error: `${e.code}: ${e.message}${e.detail ? ` | ${e.detail}` : ""}`,
       usage,
     });
+
+    /*
+     * R5.1 的「超限告警」：重试用尽这件事必须**显式说出来**。
+     * 否则用户看到的只是上游的原始报错（比如一句 502），无从知道自己其实已经被重试过 2 次 ——
+     * 也就分不清「上游抖了一下」和「上游持续不可用，该去看看服务了」。
+     * 结构化数据（attempts/retries/degraded）已由上面的 writeLog 落进 trace，这里补的是**人话**。
+     */
+    if (retries > 0) {
+      e.message = `${e.message}（已退避重试 ${retries} 次仍失败）`;
+    }
     throw e;
   }
 }

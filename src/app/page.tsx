@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AspectRatio, Outline, Shot, Storyboard, StyleSpec } from "@/lib/schema";
-import { ASPECT_LABEL, formatTimecode } from "@/lib/schema";
+import { ASPECT_LABEL, ShotSchema, formatTimecode } from "@/lib/schema";
+import { fingerprint } from "@/lib/fingerprint";
 import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown, wholeVideoPrompt } from "@/lib/exports";
 import { suggestShotCount } from "@/lib/prompts";
 import type { LlmConfigsResponse, LlmProfileSafe } from "@/lib/llm-types";
@@ -67,6 +68,25 @@ interface Persisted {
   textProfileId: string;
   imageProfileId: string;
   videoProfileId: string;
+  /** 生成这批分镜时的输入指纹 —— 用来判断「输入是否在生成之后被改过」（R1.2） */
+  sbInputFingerprint: string;
+}
+
+/** /api/export 的回执（R6.1 归档结果） */
+interface ArchiveResult {
+  runId: string;
+  dir: string;
+  relDir: string;
+  written: Array<{ name: string; bytes: number }>;
+  failed: Array<{ name: string; reason: string }>;
+  totalBytes: number;
+}
+
+/** 归档清单里的字节数展示 */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function download(filename: string, content: string, type: string) {
@@ -125,6 +145,10 @@ export default function Page() {
   const [refImage, setRefImage] = useState<{ dataUrl: string; name: string } | null>(null);
   const [imgLoading, setImgLoading] = useState(false);
 
+  /* ── 产物归档（R6.1）：把成片 mp4 与关键帧图真正落到 .data/artifacts/ ── */
+  const [archiving, setArchiving] = useState(false);
+  const [archiveResult, setArchiveResult] = useState<ArchiveResult | null>(null);
+
   const [loading, setLoading] = useState<"" | "style" | "shots">("");
   const [error, setError] = useState<ApiError | null>(null);
   /** 当前生成请求的中断控制器（弹窗「取消生成」用） */
@@ -132,6 +156,8 @@ export default function Page() {
 
   // ── 分镜流式生成进度（两段式：大纲 → 逐镜）──
   const [outline, setOutline] = useState<Outline | null>(null);
+  /** 生成这批分镜时的输入指纹（R1.2：与当前输入比对，判断结果是否已过期） */
+  const [sbInputFingerprint, setSbInputFingerprint] = useState("");
   const [failedShots, setFailedShots] = useState<number[]>([]);
   const [progress, setProgress] = useState<{ phase: "" | "outline" | "shots"; done: number; total: number; last: string }>(
     { phase: "", done: 0, total: 0, last: "" }
@@ -183,7 +209,12 @@ export default function Page() {
         if (typeof s.targetDuration === "number") setTargetDuration(s.targetDuration);
         if (typeof s.shotCount === "number") setShotCount(s.shotCount);
         if (s.style) setStyle(s.style);
-        if (s.shots?.length) setShots(s.shots);
+        if (s.shots?.length) {
+          /* 过一遍 schema 再恢复：老版本存下的分镜缺新字段（如 keyframe_attempts），
+             zod 的 catch 会补上默认值；否则 undefined 一路带到 +1 会变成 NaN。 */
+          const parsed = ShotSchema.array().safeParse(s.shots);
+          if (parsed.success) setShots(parsed.data);
+        }
         if (s.sbMeta) setSbMeta(s.sbMeta);
         if (typeof s.globalNegative === "string") setGlobalNegative(s.globalNegative);
         if (typeof s.globalNegativeCn === "string") setGlobalNegativeCn(s.globalNegativeCn);
@@ -192,6 +223,7 @@ export default function Page() {
         if (typeof s.textProfileId === "string") setTextProfileId(s.textProfileId);
         if (typeof s.imageProfileId === "string") setImageProfileId(s.imageProfileId);
         if (typeof s.videoProfileId === "string") setVideoProfileId(s.videoProfileId);
+        if (typeof s.sbInputFingerprint === "string") setSbInputFingerprint(s.sbInputFingerprint);
         // 只在对应数据确实存在时才恢复到该 tab，避免落到被禁用的空 tab
         if (s.tab === "input" || (s.tab === "style" && s.style) || (s.tab === "shots" && s.shots?.length)) {
           setTab(s.tab);
@@ -223,6 +255,7 @@ export default function Page() {
           textProfileId,
           imageProfileId,
           videoProfileId,
+          sbInputFingerprint,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       } catch {
@@ -247,6 +280,7 @@ export default function Page() {
     textProfileId,
     imageProfileId,
     videoProfileId,
+    sbInputFingerprint,
   ]);
 
   /** 清空本地保存的工作进度（回到全新会话） */
@@ -273,6 +307,8 @@ export default function Page() {
     setConsistencyNotes([]);
     setFailedShots([]);
     setRefImage(null);
+    setSbInputFingerprint("");
+    setArchiveResult(null);
     setError(null);
     setProgress({ phase: "", done: 0, total: 0, last: "" });
     clearVideoTasks();
@@ -339,6 +375,12 @@ export default function Page() {
 
   const handleGenerateKeyframe = useCallback(
     async (index: number, prompt: string) => {
+      /* 先记一次尝试：成败都计数，否则失败的请求会绕过 R3.2 的上限 */
+      setShots((prev) =>
+        prev
+          ? prev.map((s) => (s.index === index ? { ...s, keyframe_attempts: (s.keyframe_attempts ?? 0) + 1 } : s))
+          : prev
+      );
       const url = await generateKeyframe(index, {
         prompt,
         profileId: imageProfileId || undefined,
@@ -363,10 +405,20 @@ export default function Page() {
     );
   }, [clearKeyframeError]);
 
-  /** 一键生成全部关键帧：串行逐张，避免并发打爆图接口 */
+  /** 一键补齐缺失的关键帧：串行逐张（避免并发打爆图接口），且只处理**还没有首帧**的镜 ——
+   *  否则「一键」会把已就位的镜全部重烧一遍图配额。想换掉已就位的那张走单镜重出。 */
   const handleGenerateAllKeyframes = useCallback(async () => {
-    if (!shots?.length) return;
-    const items = shots.map((s) => ({
+    const missing = (shots ?? []).filter((s) => !s.keyframe_url);
+    if (!missing.length) return;
+    /* 发起即计数，与单镜口径一致 */
+    setShots((prev) =>
+      prev
+        ? prev.map((s) =>
+            missing.some((m) => m.index === s.index) ? { ...s, keyframe_attempts: (s.keyframe_attempts ?? 0) + 1 } : s
+          )
+        : prev
+    );
+    const items = missing.map((s) => ({
       index: s.index,
       req: {
         prompt: s.image_prompt || s.video_prompt,
@@ -389,6 +441,14 @@ export default function Page() {
 
   /** 已就位的关键帧数量（面板进度用） */
   const keyframeDone = (shots ?? []).filter((s) => s.keyframe_url).length;
+  /** 还缺几张 —— 批量按钮只补这些，全部就位时按钮转为禁用 */
+  const keyframeMissing = (shots ?? []).length - keyframeDone;
+
+  /* ── R1.2：当前输入 vs 这批分镜的来源输入 ──
+     不一致 = 结果已过期。这是全流程里最贵的错误：改了 brief 却拿旧分镜继续往下走，
+     后面每一步（关键帧、视频）都真烧配额，产物却对不上新输入，且没有任何 UI 信号。 */
+  const currentInputFingerprint = fingerprint(brief, aspectRatio, targetDuration, shotCount, refImage?.dataUrl ?? "");
+  const inputDrifted = Boolean(shots?.length && sbInputFingerprint && currentInputFingerprint !== sbInputFingerprint);
 
   const switchTab = useCallback(
     (k: Tab) => {
@@ -414,6 +474,57 @@ export default function Page() {
   function patchShot(index: number, next: Shot) {
     setShots((prev) => (prev ? prev.map((s) => (s.index === index ? next : s)) : prev));
   }
+
+  /* 从原来的「return 之前」提到这里：归档回调（useCallback）需要引用它，
+     而 hooks 必须先于 return，所以 storyboard 得先落地。 */
+  const storyboard = canShots ? buildStoryboard() : null;
+
+  /**
+   * 归档本次产出（R6.1）。
+   *
+   * 「预览 URL」不等于「交付物」—— 上游链接会随工作台的任务记录一起被清掉。这里把成片 mp4
+   * 与关键帧图交服务端代拉落到本地，同时写三份文本交付物（JSON / Markdown / 整片 prompt）。
+   * 还没有成片也允许归档：风格与分镜 prompt 本身就是交付物的一部分。
+   */
+  const handleArchive = useCallback(async () => {
+    if (!style || !storyboard) return;
+    setArchiving(true);
+    setError(null);
+    try {
+      const assets: Array<{ name: string; url: string }> = [];
+      for (const s of storyboard.shots) {
+        const n = String(s.index).padStart(2, "0");
+        if (s.keyframe_url) assets.push({ name: `shot-${n}-keyframe.png`, url: s.keyframe_url });
+        const v = videoTasks[s.index]?.videoUrl;
+        if (v) assets.push({ name: `shot-${n}.mp4`, url: v });
+      }
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files: [
+            { name: "storyboard.json", content: bundleAll(storyboard, style) },
+            { name: "storyboard.md", content: toMarkdown(storyboard, style) },
+            {
+              name: "whole-prompt.txt",
+              content: wholeVideoPrompt(storyboard, style, { entities: outline?.entities }),
+            },
+          ],
+          assets,
+        }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        setError({ code: json.code ?? "UPSTREAM", message: json.message ?? "归档失败", detail: json.detail });
+        return;
+      }
+      setArchiveResult(json as ArchiveResult);
+    } catch (e) {
+      setError({ code: "NETWORK", message: "归档请求失败", detail: String(e) });
+    } finally {
+      setArchiving(false);
+    }
+  }, [style, storyboard, videoTasks, outline]);
 
   async function genStyle(adjust?: string) {
     if (!brief.trim() && !refImage) {
@@ -470,6 +581,8 @@ export default function Page() {
   }
 
   async function genShots() {
+    /* 重入保护：生成期间重复点击不重复发起（R1.2 去重的第一层，防误触白烧配额） */
+    if (loading) return;
     if (!style) return;
     if (!profiles.text.length) {
       setError({
@@ -483,6 +596,9 @@ export default function Page() {
     setShots(null);
     setOutline(null);
     setFailedShots([]);
+    /* 捕获**发起瞬间**的输入指纹（而不是完成时的）：它才是这批分镜的来源标识（R1.2）。
+       不在这里清空已有的指纹 —— 生成失败时旧结果仍对应旧输入，清掉会误报「输入已变更」。 */
+    const fpAtStart = fingerprint(brief, aspectRatio, targetDuration, shotCount, refImage?.dataUrl ?? "");
     setProgress({ phase: "outline", done: 0, total: shotCount, last: "正在生成分镜大纲…" });
     try {
       const res = await fetch("/api/shots", {
@@ -532,6 +648,7 @@ export default function Page() {
             target_duration: ev.outline.meta.target_duration || targetDuration,
             shots_count: total,
           });
+          setSbInputFingerprint(fpAtStart);
           setGlobalNegative(ev.outline.global_negative);
           setGlobalNegativeCn(ev.outline.global_negative ?? "");
           setConsistencyNotes(ev.outline.consistency_notes);
@@ -626,8 +743,6 @@ export default function Page() {
       setProgress((p) => ({ ...p, phase: "" })); // 任何路径都关闭弹窗
     }
   }
-
-  const storyboard = canShots ? buildStoryboard() : null;
 
   return (
     <main className="mx-auto max-w-[1180px] px-6 py-6">
@@ -945,6 +1060,34 @@ export default function Page() {
       {/* ───────── ③ 分镜（可编辑 + 中英）───────── */}
       {tab === "shots" && storyboard && style ? (
         <div className="space-y-4">
+          {/* R1.2：输入在生成之后被改过 —— 继续往下走会把配额烧在过期的分镜上 */}
+          {inputDrifted ? (
+            <div className="panel p-4" style={{ borderColor: "var(--err)" }}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[13px] font-semibold" style={{ color: "var(--err)" }}>
+                  输入已变更：当前分镜对应的是改动前的输入
+                </span>
+                <span className="ml-auto flex items-center gap-2">
+                  <button type="button" className="btn" onClick={() => setTab("input")}>
+                    回输入 tab
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={loading !== ""}
+                    onClick={() => void genShots()}
+                  >
+                    用新输入重新生成分镜
+                  </button>
+                </span>
+              </div>
+              <p className="mt-2 text-[11.5px] leading-relaxed text-[var(--muted)]">
+                接着给这批分镜生关键帧、生视频，产物会对不上新输入，配额照样要花。要么重新生成分镜，
+                要么把输入改回去 —— 两边指纹一致时本条自动消失。
+              </p>
+            </div>
+          ) : null}
+
           {/* 生成进度 / 失败重试面板 */}
           {progress.phase !== "" || failedShots.length ? (
             <div className="panel p-4">
@@ -1031,7 +1174,45 @@ export default function Page() {
               >
                 下载整片 .txt
               </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={archiving}
+                onClick={() => void handleArchive()}
+                title="把成片 mp4、关键帧图与 prompt 落到 .data/artifacts/ —— 不依赖上游链接是否还在"
+              >
+                {archiving ? "归档中…" : "归档到本地"}
+              </button>
             </div>
+
+            {archiveResult ? (
+              <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--panel-2)] p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[12px] font-medium" style={{ color: "var(--accent)" }}>
+                    已归档 {archiveResult.written.length} 个文件 · {fmtBytes(archiveResult.totalBytes)}
+                  </span>
+                  <CopyButton text={archiveResult.dir} label="复制路径" />
+                  <button type="button" className="btn ml-auto" onClick={() => setArchiveResult(null)}>
+                    收起
+                  </button>
+                </div>
+                <div className="mono mt-1.5 text-[11px] break-all text-[var(--muted)]">{archiveResult.dir}</div>
+                <ul className="mt-2 space-y-0.5">
+                  {archiveResult.written.map((f) => (
+                    <li key={f.name} className="flex items-center gap-2 text-[11.5px]">
+                      <span className="mono">{f.name}</span>
+                      <span className="text-[var(--muted)]">{fmtBytes(f.bytes)}</span>
+                    </li>
+                  ))}
+                </ul>
+                {archiveResult.failed.length ? (
+                  <div className="mt-2 text-[11.5px] leading-relaxed" style={{ color: "var(--err)" }}>
+                    {archiveResult.failed.length} 项没拿到：
+                    {archiveResult.failed.map((f) => `${f.name}（${f.reason}）`).join("；")}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {consistencyNotes.length ? (
@@ -1080,10 +1261,14 @@ export default function Page() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={keyframeAnyBusy}
+                  disabled={keyframeAnyBusy || keyframeMissing === 0}
                   onClick={() => void handleGenerateAllKeyframes()}
                 >
-                  {keyframeAnyBusy ? `生成中… 还有 ${keyframePending} 张` : `一键生成全部关键帧（${shots.length} 镜）`}
+                  {keyframeAnyBusy
+                    ? `生成中… 还有 ${keyframePending} 张`
+                    : keyframeMissing === 0
+                      ? "全部关键帧已就位"
+                      : `一键补齐关键帧（缺 ${keyframeMissing} 镜）`}
                 </button>
               </div>
               <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--muted)]">

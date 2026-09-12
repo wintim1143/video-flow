@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ShotSchema, type Shot } from "@/lib/schema";
 import { buildShotVideoPayload } from "@/lib/video-payload";
-import { keyframeSizeFor } from "@/lib/use-keyframes";
+import { MAX_KEYFRAME_ATTEMPTS, keyframeSizeFor } from "@/lib/use-keyframes";
 import { agnesProvider } from "@/lib/video-providers";
 
 /**
@@ -112,5 +112,24 @@ describe("Shot schema 的关键帧字段", () => {
     const s = ShotSchema.parse({ index: 3, duration: 5, keyframe_url: null, keyframe_prompt_used: 123 });
     expect(s.keyframe_url).toBe("");
     expect(s.keyframe_prompt_used).toBe("");
+  });
+});
+
+describe("R3.2 关键帧重出上限", () => {
+  it("口径钉死：首次 + 2 次重出 = 3（改这个数就是改判据，必须是有意为之）", () => {
+    expect(MAX_KEYFRAME_ATTEMPTS).toBe(3);
+  });
+
+  it("旧数据没有这个字段 → 解析为 0，而不是 NaN", () => {
+    expect(ShotSchema.parse({ index: 1, duration: 5 }).keyframe_attempts).toBe(0);
+  });
+
+  it("坏值也收敛成 0", () => {
+    expect(ShotSchema.parse({ index: 1, duration: 5, keyframe_attempts: "abc" }).keyframe_attempts).toBe(0);
+    expect(ShotSchema.parse({ index: 1, duration: 5, keyframe_attempts: null }).keyframe_attempts).toBe(0);
+  });
+
+  it("计数原样保留", () => {
+    expect(ShotSchema.parse({ index: 1, duration: 5, keyframe_attempts: 2 }).keyframe_attempts).toBe(2);
   });
 });

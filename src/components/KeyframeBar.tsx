@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { Shot } from "@/lib/schema";
-import { keyframeSizeFor } from "@/lib/use-keyframes";
+import { MAX_KEYFRAME_ATTEMPTS, keyframeSizeFor } from "@/lib/use-keyframes";
 import { EditableText } from "./EditableText";
 
 /**
@@ -44,6 +44,19 @@ export function KeyframeBar({
   const settled = Boolean(shot.keyframe_url);
   const size = keyframeSizeFor(aspectRatio);
 
+  /*
+   * R3.2：闸门 2 的「确认/重出 ≤2 次」。
+   * attempts 含首次，所以上限是 3（首次 + 2 次重出）。超了默认锁住按钮 ——
+   * 解禁是**显式**的（点「解除限制」），不弹二次确认框：本地工具里反复打磨是正当需求，
+   * 但默认状态必须守住判据，否则「闸门 2 人工把关防乱烧」就没有落点。
+   * 解禁状态只活在本次会话（刷新即失效），符合「每次会话重新受约束」的意图。
+   */
+  const [unlocked, setUnlocked] = useState(false);
+  /* SSE 流式回来的 shot 不带这个字段（服务端手工拼的对象），所以必须兜底 */
+  const attempts = shot.keyframe_attempts ?? 0;
+  const regens = Math.max(0, attempts - 1);
+  const capped = attempts >= MAX_KEYFRAME_ATTEMPTS && !unlocked;
+
   return (
     <div
       className="mb-3 rounded-md border p-3"
@@ -64,16 +77,32 @@ export function KeyframeBar({
           <span className="chip mono text-[11px] text-[var(--muted)]">未生成 · 视频将退化为文生视频</span>
         )}
         <span className="chip mono text-[11px] text-[var(--muted)]">{size}</span>
+        {regens > 0 ? (
+          <span className="chip mono text-[11px]" style={{ color: capped ? "var(--err)" : "var(--muted)" }}>
+            已重出 {regens}/{MAX_KEYFRAME_ATTEMPTS - 1}
+          </span>
+        ) : null}
 
         <span className="ml-auto flex items-center gap-2">
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || !enabled || !prompt.trim()}
+            disabled={busy || !enabled || !prompt.trim() || capped}
+            title={capped ? `已达重出上限（${MAX_KEYFRAME_ATTEMPTS - 1} 次）。确认要继续请点「解除限制」。` : undefined}
             onClick={() => onGenerate(prompt)}
           >
             {busy ? "生成中…" : settled ? "重新生成" : "生成关键帧"}
           </button>
+          {capped ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setUnlocked(true)}
+              title="超出 R3.2 判据（重出 ≤2 次）继续生成，会消耗图片配额"
+            >
+              解除限制
+            </button>
+          ) : null}
           {settled ? (
             <button type="button" className="btn" onClick={onClear} title="仅清除本镜首帧，视频会退回文生视频模式">
               清除
@@ -92,6 +121,13 @@ export function KeyframeBar({
       {error ? (
         <div className="mt-2 text-[12px] leading-relaxed" style={{ color: "var(--err)" }}>
           {error}
+        </div>
+      ) : null}
+
+      {capped ? (
+        <div className="mt-2 text-[11.5px] leading-relaxed" style={{ color: "var(--err)" }}>
+          本镜已重出 {regens} 次，达到闸门 2 的上限（{MAX_KEYFRAME_ATTEMPTS - 1} 次）。确认还要继续就点「解除限制」；
+          否则建议先改关键帧 prompt，或回风格 tab 调整方向 —— 反复重出同一描述通常是 prompt 本身的问题。
         </div>
       ) : null}
 

@@ -237,6 +237,7 @@ src/
     api/logs/route.ts        链路日志查询 / 微调 JSONL 导出
     api/llm-configs/route.ts 脱敏的 LLM profile 列表（前端下拉用）
     api/video/route.ts       视频：POST 建任务 / GET 查任务 / GET 能力自述（含厂商与闸门信息）
+    api/export/route.ts      产物归档：把成片 mp4 / 关键帧图 / prompt 落到 .data/artifacts/
   components/
     ShotRow.tsx             单镜分镜卡（中英对照 / 节拍 / 状态链 / 复制前缀 / 视频生成条）
     VideoGenBar.tsx         单镜视频生成条（建任务 / 状态 / 进度 / 内联播放 / 下载）
@@ -263,13 +264,36 @@ src/
     use-video-tasks.ts      视频任务状态机 + 全局单一轮询器 + localStorage 持久化
     use-keyframes.ts        关键帧状态机（串行队列）+ keyframeSizeFor 画幅选尺寸
     video-payload.ts        buildShotVideoPayload：组装建任务入参（有关键帧则带 firstFrame）
-test/                       vitest 回归测试（schema / prompts / exports / trace-log / llm / text-utils / video / video-providers / keyframe）
+    fingerprint.ts          输入指纹（FNV-1a）：判断「当前结果是否对应当前输入」（R1.2 的落点）
+    artifacts.ts            产物归档：文本落盘 + 按 URL 代拉二进制，单项失败不整体失败（R6.1）
+test/                       vitest 回归测试（schema / prompts / exports / trace-log / llm / text-utils / video / video-providers / keyframe / fingerprint / artifacts）
 ```
+
+## 产物归档（R6.1）
+
+**预览 URL 不等于交付物** —— 上游链接会随工作台的任务记录一起被清掉。③ 分镜 tab 底部导出区的
+「归档到本地」会把交付物真正落到磁盘：
+
+```
+.data/artifacts/<YYYYMMDD-HHMMSS>/
+  storyboard.json         分镜全量（含状态链 / 节拍 / 关键帧地址）
+  storyboard.md           含中文的 Markdown 版
+  whole-prompt.txt        整片单 prompt
+  shot-01-keyframe.png    关键帧（已生成才归档）
+  shot-01.mp4             成片（已出片才归档）
+  manifest.json           清单：写成功 / 失败的逐项记录
+```
+
+- 服务端**代拉**资产（浏览器直下会撞 CORS），且**单项失败不整体失败** —— 5 个成片挂 1 个，
+  其余 4 个照样落盘；失败的如实进 `manifest.failed` 并在 UI 上标红，不静默吞掉。
+- 归档根目录可用 `ARTIFACT_DIR` 覆盖（默认 `<项目根>/.data/artifacts`，已在 `.gitignore` 内）。
+- 刻意不用 zip：Node 没有内置 zip 写入，为打包引一层依赖不划算；这是本地工具，落目录反而更好取用。
 
 ## 后续里程碑衔接
 
-- **M1**：「关键帧生图 → I2V 生视频 → 预览」闭环**已贯通**（③ 分镜 tab 内每镜「生成关键帧 → 生成视频」，异步任务 + 配额闸门 + 内联播放）。剩余可做：整片拼接（**注意 M1 规格靠 <10s 单镜砍掉拼接，M3 才做满**）、尾帧链自动回填（镜 N 末帧 → 镜 N+1 首帧，`firstFrame` 通路已就绪）。
-- **M3**：多分镜拼接，`consistency_notes` + 状态链即为跨镜一致性锁定的输入。
+- **M1 已验收** —— 见 [`M1-验收记录.md`](./M1-验收记录.md)。「关键帧生图 → I2V 生视频 → 预览」闭环贯通，实测成片 704×1280 / 24fps / 5.1667s（判据要求 <10s）。
+- **M3 待做**：① ffmpeg 拼接（**注意 M1 规格刻意靠 <10s 单镜砍掉拼接，M3 才把它做满**）；② 尾帧链自动回填（镜 N 末帧 → 镜 N+1 首帧）—— `last_frame` 在适配器（`video-providers.ts`）与路由层已就绪，**缺的是前端组装**（`video-payload.ts` 目前只传 `firstFrame`）。
+- **M2 不建议先做**：文档 `:274` 写明 M2 的前提是「<10s 单镜」，与当前多镜实况不符。
 - 接 Mastra 时，`/api/style`、`/api/shots` 两个 route 的 prompt 与 schema 可原样搬进 workflow step。
 
 ## 常见问题
@@ -285,7 +309,10 @@ test/                       vitest 回归测试（schema / prompts / exports / t
 | 生成视频报 429 / 「生成视频过于频繁」 | 生成配额冷却中。免费档约 1 次/分钟且**全账户共用**，所有分镜的按钮会一起倒计时；调 `VIDEO_CREATE_MIN_INTERVAL_MS` 或等提示的秒数 |
 | 查询报 429 / `too many video status queries` | 上游查询侧限流（约 15 次/60s）。已按 `Retry-After` 自动退避、**不判失败**；调大 `VIDEO_QUERY_MIN_INTERVAL_MS`（默认 4s 实测稳定） |
 | 生成视频报「时长超范围」 | Agnes 只接受 4–12 秒，本镜时长不在范围内。改分镜时长或换支持该时长的厂商 |
+| 建任务报 `503 video_queue_full` | 上游**队列已满**（免费档排队），不是请求参数问题。已识别为可重试并给出 30s 建议等待，按提示稍后重试即可；实测队列腾空后一次成功 |
 | 生成视频报「未知的视频厂商」 | `provider` 字段写错。可选值见 `GET /api/video` 的 `providers` 字段 |
+| 关键帧报「只返回了 base64，没有公网 URL」 | 该图片服务不返回 url。I2V 的首帧必须是上游能自己拉取的地址，换一个会返回 url 的图片 profile（Agnes 图片接口默认两者都给） |
+| 关键帧按钮变灰、提示「已达重出上限」 | R3.2 的闸门 2 上限（首次 + 2 次重出）。确认要继续就点「解除限制」；反复重出同一描述通常说明 prompt 本身该改 |
 | 参考图模式下选不到某个模型 | 该 profile 配了 `"vision": false`（纯文本模型），换支持视觉的模型 |
 | 想比较两次生成差异 | 打开 `/logs`，勾选两条记录做左右对比 |
 | 页面状态想清空 | 分镜页右下角「清空进度」（等价于清 localStorage 的 `video-flow:workbench:v1`） |
