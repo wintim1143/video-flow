@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { SingleShotRequestSchema, ShotSchema, type Shot } from "@/lib/schema";
 import { chatJSON, LLMError } from "@/lib/llm";
 import { newTraceId } from "@/lib/trace-log";
+import { dedupeRepeats } from "@/lib/text-utils";
 import { shotDetailSystemPrompt, shotDetailUserPrompt } from "@/lib/prompts";
 
 export const runtime = "nodejs";
@@ -54,6 +55,9 @@ export async function POST(req: Request) {
       end_state: outline.outline.find((o) => o.index === index)?.end_state || data.end_state,
       /* 转场设计同样以大纲为准 */
       transition_out: outline.outline.find((o) => o.index === index)?.transition_out || data.transition_out,
+      /* keywords_en verbatim 注入常与场景描述重叠 → 去掉整段重复 */
+      image_prompt: dedupeRepeats(data.image_prompt),
+      video_prompt: dedupeRepeats(data.video_prompt),
     });
     return NextResponse.json({
       ok: true,

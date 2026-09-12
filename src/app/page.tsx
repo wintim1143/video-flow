@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AspectRatio, Outline, Shot, Storyboard, StyleSpec } from "@/lib/schema";
 import { ASPECT_LABEL, formatTimecode } from "@/lib/schema";
-import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown } from "@/lib/exports";
+import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown, wholeVideoPrompt } from "@/lib/exports";
+import { suggestShotCount } from "@/lib/prompts";
 import type { LlmConfigsResponse, LlmProfileSafe } from "@/lib/llm-types";
 import { StyleEditor } from "@/components/StyleEditor";
 import { StyleTestImage } from "@/components/StyleTestImage";
@@ -14,6 +15,16 @@ import { ProgressModal } from "@/components/ProgressModal";
 
 type Tab = "input" | "style" | "shots";
 type ApiError = { code: string; message: string; detail?: string };
+
+/**
+ * App / 软件功能演示类需求识别：视频模型渲染不出像素级一致的 UI 与可读文字，
+ * 分镜式生成出来的「界面」必然是模糊的假界面 —— 这类需求应在需求页先给出范式提示。
+ */
+const APP_DEMO_RE = /\bapp\b|小程序|软件|客户端|播放器|界面|交互|功能演示|录屏|网页版|手机应用/i;
+
+function isAppDemoBrief(brief: string): boolean {
+  return APP_DEMO_RE.test(brief);
+}
 
 const EXAMPLES = [
   {
@@ -32,8 +43,27 @@ const EXAMPLES = [
 
 const DURATION_PRESETS = [5, 15, 30, 60];
 
-function suggestShotCount(targetDuration: number): number {
-  return Math.min(24, Math.max(2, Math.round(targetDuration / 5)));
+/** 默认时长（与 schema.ts 的 targetDuration default 保持一致，改一处必须改两处） */
+const DEFAULT_DURATION = 5;
+
+/** 工作台本地持久化：刷新页面不丢进度（参考图 data URL 太大，刻意不入库） */
+const STORAGE_KEY = "video-flow:workbench:v1";
+
+interface Persisted {
+  brief: string;
+  aspectRatio: AspectRatio;
+  targetDuration: number;
+  shotCount: number;
+  style: StyleSpec | null;
+  shots: Shot[] | null;
+  sbMeta: Storyboard["meta"] | null;
+  globalNegative: string;
+  globalNegativeCn: string;
+  consistencyNotes: string[];
+  outline: Outline | null;
+  tab: Tab;
+  textProfileId: string;
+  imageProfileId: string;
 }
 
 function download(filename: string, content: string, type: string) {
@@ -108,6 +138,116 @@ export default function Page() {
   const [profiles, setProfiles] = useState<LlmConfigsResponse>({ text: [], image: [], video: [] });
   const [textProfileId, setTextProfileId] = useState("");
   const [imageProfileId, setImageProfileId] = useState("");
+
+  /* ── 本地持久化：挂载后恢复一次 → 之后每次变更防抖写回 ──
+   * 只在 useEffect 里读写，保证 SSR 首屏与客户端首帧一致（不产生 hydration 警告）。 */
+  const [restored, setRestored] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const s = JSON.parse(raw) as Partial<Persisted>;
+        if (typeof s.brief === "string") setBrief(s.brief);
+        if (s.aspectRatio === "9:16" || s.aspectRatio === "16:9" || s.aspectRatio === "1:1") {
+          setAspectRatio(s.aspectRatio);
+        }
+        if (typeof s.targetDuration === "number") setTargetDuration(s.targetDuration);
+        if (typeof s.shotCount === "number") setShotCount(s.shotCount);
+        if (s.style) setStyle(s.style);
+        if (s.shots?.length) setShots(s.shots);
+        if (s.sbMeta) setSbMeta(s.sbMeta);
+        if (typeof s.globalNegative === "string") setGlobalNegative(s.globalNegative);
+        if (typeof s.globalNegativeCn === "string") setGlobalNegativeCn(s.globalNegativeCn);
+        if (Array.isArray(s.consistencyNotes)) setConsistencyNotes(s.consistencyNotes);
+        if (s.outline) setOutline(s.outline);
+        if (typeof s.textProfileId === "string") setTextProfileId(s.textProfileId);
+        if (typeof s.imageProfileId === "string") setImageProfileId(s.imageProfileId);
+        // 只在对应数据确实存在时才恢复到该 tab，避免落到被禁用的空 tab
+        if (s.tab === "input" || (s.tab === "style" && s.style) || (s.tab === "shots" && s.shots?.length)) {
+          setTab(s.tab);
+        }
+      }
+    } catch {
+      /* 本地数据损坏 / 隐私模式禁用 localStorage → 忽略，按全新会话走 */
+    }
+    setRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!restored) return;
+    const t = setTimeout(() => {
+      try {
+        const payload: Persisted = {
+          brief,
+          aspectRatio,
+          targetDuration,
+          shotCount,
+          style,
+          shots,
+          sbMeta,
+          globalNegative,
+          globalNegativeCn,
+          consistencyNotes,
+          outline,
+          tab,
+          textProfileId,
+          imageProfileId,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch {
+        /* 超配额（如分镜极多）→ 静默放弃，不影响使用 */
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [
+    restored,
+    brief,
+    aspectRatio,
+    targetDuration,
+    shotCount,
+    style,
+    shots,
+    sbMeta,
+    globalNegative,
+    globalNegativeCn,
+    consistencyNotes,
+    outline,
+    tab,
+    textProfileId,
+    imageProfileId,
+  ]);
+
+  /** 清空本地保存的工作进度（回到全新会话） */
+  const clearPersisted = useCallback(() => {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  /** 一键重置：清本地保存 + 清内存状态（不动磁盘上已导出的文件） */
+  const resetAll = useCallback(() => {
+    if (!window.confirm("清空本地保存的需求 / 风格 / 分镜，回到空白页？（已导出的文件不受影响）")) return;
+    clearPersisted();
+    setBrief("");
+    setAdjustNote("");
+    setStyle(null);
+    setShots(null);
+    setSbMeta(null);
+    setOutline(null);
+    setGlobalNegative("");
+    setGlobalNegativeCn("");
+    setConsistencyNotes([]);
+    setFailedShots([]);
+    setRefImage(null);
+    setError(null);
+    setProgress({ phase: "", done: 0, total: 0, last: "" });
+    setTargetDuration(DEFAULT_DURATION);
+    setShotCount(suggestShotCount(DEFAULT_DURATION));
+    setTab("input");
+  }, [clearPersisted]);
 
   useEffect(() => {
     fetch("/api/llm-configs")
@@ -486,6 +626,21 @@ export default function Page() {
             onChange={(e) => setBrief(e.target.value)}
           />
 
+          {isAppDemoBrief(brief) ? (
+            <div
+              className="mt-2 rounded-lg border px-3 py-2 text-[12px] leading-relaxed"
+              style={{ borderColor: "#6b5420", background: "rgba(180, 140, 40, 0.10)" }}
+            >
+              <span className="font-medium">提示：这条需求更像「App 功能演示」范式。</span>
+              视频模型渲染不出像素级一致的界面和可读文字，分镜式生成出的「UI」会是模糊的假界面。
+              推荐做法：功能演示走
+              <span className="font-medium">真机录屏</span>
+              （画面里的视频画布再用 AI 让它动起来）；本工具更适合做这款 App 的
+              <span className="font-medium">品牌情绪片</span>
+              （氛围、痛点、人物使用感受），而不是逐帧展示功能。
+            </div>
+          ) : null}
+
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="text-[12px] text-[var(--muted)]">示例：</span>
             {EXAMPLES.map((ex) => (
@@ -760,6 +915,19 @@ export default function Page() {
               >
                 下载 .json
               </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() =>
+                  download(
+                    "storyboard-whole.txt",
+                    wholeVideoPrompt(storyboard, style, { entities: outline?.entities }),
+                    "text/plain"
+                  )
+                }
+              >
+                下载整片 .txt
+              </button>
             </div>
           </div>
 
@@ -811,6 +979,14 @@ export default function Page() {
               </button>
               <button type="button" className="btn" onClick={() => setTab("input")}>
                 ← 回需求
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={resetAll}
+                title="清空本地保存的需求 / 风格 / 分镜，回到空白页"
+              >
+                清空进度
               </button>
             </div>
           </div>

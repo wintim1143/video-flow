@@ -19,6 +19,9 @@ cp .env.example .env.local
 
 # 2. 启动
 npm run dev          # http://localhost:3200
+
+# 3. （可选）跑回归测试
+npm test             # vitest，74+ 例，纯 lib 层、无数据库、不耗 LLM 额度
 ```
 
 ## 多 LLM 配置（文本 / 图片 / 视频）
@@ -29,55 +32,99 @@ npm run dev          # http://localhost:3200
 {
   "text": [
     { "id": "terra", "name": "GPT-5.6 Terra", "baseURL": "https://lanfengai.cn/v1", "apiKey": "sk-xxx", "model": "gpt-5.6-terra" },
-    { "id": "astra", "name": "GPT-6 Astra",   "baseURL": "https://lanfengai.cn/v1", "apiKey": "sk-xxx", "model": "gpt-6-astra" }
+    { "id": "ds",    "name": "DeepSeek（纯文本）", "baseURL": "https://你的地址/v1", "apiKey": "sk-xxx", "model": "deepseek-chat", "vision": false }
   ],
   "image": [
     { "id": "img1", "name": "某生图服务", "baseURL": "https://生图服务商/v1", "apiKey": "sk-xxx", "model": "模型名", "endpoint": "/images/generations" }
   ],
-  "video": []
+  "video": [
+    { "id": "agnes", "name": "Agnes Video 2.5 Flash", "baseURL": "https://apihub.agnes-ai.com/v1", "apiKey": "sk-xxx", "model": "agnes-video-2.5-flash", "endpoint": "/videos", "mode": "见服务商文档" }
+  ]
 }
 ```
 
-- **text**：数组，可配多个。顶栏「文本LLM」下拉随时切换，风格 / 分镜生成共用当前选中项。`name` 缺省用 `model`；`id` 缺省自动生成。`reasoningEffort` 可选（`minimal`/`low`/`high`，设 `""` 关闭）：推理模型（如 gpt-5.6 系）默认 `minimal`，实测把单镜耗时从 ~120s 降到 ~19s；服务商不支持时自动剥离该参数。
+- **text**：数组，可配多个。顶栏「文本LLM」下拉随时切换，风格 / 分镜生成共用当前选中项。`name` 缺省用 `model`；`id` 缺省自动生成。
+  - `reasoningEffort` 可选（`minimal`/`low`/`high`，设 `""` 关闭）：推理模型（如 gpt-5.6 系）默认 `minimal`，实测把单镜耗时从 ~120s 降到 ~19s；服务商不支持时自动剥离该参数。
+  - `vision` 可选：**缺省 = 支持图片输入**；填 `false` 表示纯文本模型（如 DeepSeek），上传参考图提取风格时前端下拉会自动过滤掉它、服务端返回 `VISION_UNSUPPORTED`。
 - **image**：配置后才在 ② 风格 tab 出现「生成风格样张」区块 —— 用当前风格（含你编辑后的色板/关键词）出一张测试图，确认视觉方向是否满意；`endpoint` 缺省 `/images/generations`（OpenAI Images 协议）。
-- **video**：M1 预留，现在配了也不生效。
+- **video**：**M0 页面没有生视频入口**（M0 承诺不生视频，不会误触产生费用）。配置已接到代码里：`GET /api/video` 可查看接线状态（是否配好 `mode`），`POST /api/video` 可透传一次生成请求供脚本 / M1 调用。`mode` 是各平台必填项、取值各异，因此不从代码硬编码，缺配置时明确报 `MODE_MISSING` 并指向文档。
 - 配置文件存在时**优先于** `.env.local`；无此文件 / 非法 JSON 自动回退 `.env.local` 单文本配置（`LLM_REASONING_EFFORT` 环境变量可覆盖回退配置的思考力度）。
 - ⚠️ **key 只能写在 `llm.config.json`（已被 gitignore）或 `.env.local`，`llm.config.example.json` 是模板、会被提交，切勿填真实 key。**
 
-## 分镜生成：两段式 + 流式进度
+## 分镜生成：两段式 + 串行 + 流式进度
 
 分镜不用「一次生成整个 JSON」（推理模型下必超时），改为：
 
-1. **大纲**（一次小调用，10-90s）：每镜一句话规划节奏与叙事，顺带产出全片负面词、一致性锁定项、**实体档案**与**状态链**；
-2. **逐镜展开**（并发 2 的流水线）：单镜小输出（实测 ~19s/镜），失败自动重试 1 次，仍失败只标记该镜，其余镜照常；
+1. **大纲**（一次小调用，10-90s）：每镜一句话规划节奏与叙事，顺带产出全片负面词、一致性锁定项、**实体档案**、**状态链**与**转场设计**；
+2. **逐镜展开**（**串行**流水线）：单镜小输出（实测 ~19s/镜），失败自动重试 1 次，仍失败只标记该镜，其余镜照常；
 3. 全程 SSE 推送进度：前端实时显示「第 X/Y 镜」进度条、每镜耗时；失败镜出现「重试第 N 镜」按钮（调 `/api/shot` 定点重试，不必整单重来）。
+
+> **为什么是串行而不是并发**：串行的目的是「尾帧链」——镜 N 的成品（image_prompt / end_state）会作为参考喂给镜 N+1，实现「镜 N 末帧 = 镜 N+1 首帧」的动势衔接。并发下邻居完成的先后顺序不保证，接力会丢失。参考实现：`ai-video-pipeline`（尾帧链）、`StoryMem`（跨镜记忆）、`HoloCine`（转场前移到导演层统一规划）。
 
 ### 跨镜连续性（防"车头翻转"式错位）
 
-逐镜独立生成时，仅锁风格与产品属性不够——主体在**空间中的状态**（车头朝向、车灯亮灭、光源方向、时间天气）不锁就会镜间跳变。解法是把状态链放进大纲（大纲是单次顺序调用，天然有全局视野，且不依赖逐镜生成顺序、并发 2 不受影响）：
+逐镜独立生成时，仅锁风格与产品属性不够——主体在**空间中的状态**（车头朝向、车灯亮灭、光源方向、时间天气）不锁就会镜间跳变。三层机制：
 
 - **实体档案 `entities`**：每个跨镜主体一条锁定英文描述符 `descriptor_en`（外观 + **朝向基准约定**，如 "front of the car facing the camera, headlights on"），逐镜 verbatim 嵌入 prompt；
 - **状态链 `start_state / end_state`**：每镜的镜首/镜末状态（朝向/位置/状态 + 环境），大纲硬性要求镜 N 的 end_state = 镜 N+1 的 start_state，未经转场说明禁止翻转；
-- 单镜展开时，prompt 注入「上一镜末状态 + 本镜镜首状态 + 镜末状态」，硬规则：image_prompt 静态画面**严格等于** start_state，video_prompt 从 start_state 连续演化到 end_state；
-- 服务端用大纲值强制覆盖 shot 的状态链字段（与 start/duration 同原则，不信任 LLM 照抄）；分镜卡上以「状态链：镜首 → 镜末」可视化展示，方便人工核对。
+- **转场设计 `transition_out`（大纲统一规划）**：相邻两镜同场景/同主体连续时，必须用**匹配剪辑 / 首尾帧衔接**并写明动势怎么承接；换场才允许硬切/叠化。**禁止无设计的生硬跳切**（如产品特写直接跳到模特脸部）。该字段与状态链一样，由服务端用大纲值强制覆盖，不让单镜展开自由发挥。
+- 单镜展开时，prompt 注入「上一镜末状态 + 本镜首末状态 + 上一镜成品参考 + 本镜转场设计」；
+- 分镜卡上以「状态链：镜首 → 镜末」可视化展示，方便人工核对。
 
+### 秒级节拍 · beats（粒度自适应）
+
+每镜可带一节拍数组，把动作按时段切分（如 `0-1s: ...` / `1-2s: ...`），帮助生视频模型控制节奏，防止所有动作挤在一段粗粒度描述里。
+
+**粒度由 LLM 按本镜动作复杂度决定，不固定每秒一拍**：动作密集、姿态变化丰富的镜可细到 0.5 秒级；动作单一或静态氛围镜可以整镜一拍。硬约束只有结构性的：时间段连续覆盖 `0 → duration`（末拍可短）、每拍一个连续小动作、首拍从 `start_state` 出发、末拍结束于 `end_state`。
 
 ## 三步流程
 
-> 三个环节是**常驻 tab**，只要该步有数据就能来回切换（在分镜里切回风格、再切回来都不会丢）。
+> 三个环节是**常驻 tab**，只要该步有数据就能来回切换（在分镜里切回风格、再切回来都不会丢）。工作状态（需求 / 风格 / 分镜 / 时长）会**自动存到 localStorage**，刷新页面不丢；分镜页右下角有「清空进度」按钮可一键回到空白页。
 
 **风格来源二选一或混用**：① 纯文字描述 → LLM 匹配/定义风格；② 上传参考图 → vision 模型从图**提取**风格（palette 从图实际取色、keywords_en 复刻图中视觉特征），文字可留空或仅补充产品/内容信息；③ 图+文同给（图定风格、文定内容）。参考图在浏览器端压缩到 ≤1024px JPEG 后上传。所选文本 LLM 需支持图片输入（不支持时会明确报 VISION_UNSUPPORTED 并提示换模型）。
 
 | 阶段 | 做什么 | 产出（均可编辑） |
 |---|---|---|
-| ① 需求 | 填广告描述 + 选时长/画幅 | — |
+| ① 需求 | 填广告描述 + 选时长/画幅（**默认 5s**，预设 5/15/30/60） | — |
 | ② 风格（闸门 1） | LLM 按 8 维度定义风格，优先匹配内置 seed | 风格卡：色板 / 七维设定 / 英文一致性关键词 / 负面词 —— 全部字段可改，色板 HEX 可增删 |
-| ③ 分镜 | 按确认的风格拆 N 镜 | 每镜**中英对照** prompt：英文用于生成（可复制），中文用于展示校准；每镜有 EN/中文 切换，Image / Video / Negative Prompt 均可直接编辑 |
+| ③ 分镜 | 按确认的风格拆 N 镜 | 每镜**中英对照** prompt：英文用于生成（可复制），中文用于展示校准；每镜有 EN/中文 切换，Image / Video / Negative / 节拍 均可直接编辑 |
+
+> 若需求读起来像「App / 小程序 / 播放器 / 界面交互」这类**功能演示**，需求页会提示：视频模型渲染不出像素级一致的 UI 与可读文字，功能演示建议走**真机录屏**（画面里的视频画布再让 AI 动起来），本工具更适合做该 App 的**品牌情绪片**。
 
 交互要点：
 - **编辑 prompt**：点进文本框即可改，失焦（或 Cmd+Enter）自动保存；复制按钮复制的就是当前语言 + 你改后的内容。
+- **复制带前缀**：单镜视频 prompt 的「复制」会自动带 `【广告视频 · 画幅 9:16 · 本镜时长 2.5秒 · 单镜独立生成】` 前缀，粘到生成平台不用再口头交代画幅和时长。
 - **风格改完怎么同步到分镜**：改完风格字段后点分镜 tab 的「用当前风格写分镜」会重算；不改不自动覆盖你手工调过的分镜。
 - 不满意可在 ② 点「换一套」（可附带调整要求，如"更冷一点"），风格成本为零、可反复重来，**不消耗任何生图/生视频额度**。
+
+## 导出
+
+- 复制全部图像 Prompt(EN)（批量去生首帧图，英文生成版）
+- 复制全部视频 Prompt(EN)（批量去图生视频，已带画幅/时长前缀、节拍与负面词）
+- **复制整片 Prompt（单段长文本）** / 下载整片 `.txt`：按「整片模式」视频模型（Seedance / MiniMax h3 / 即梦长视频）的惯用结构，把整条分镜拼成**一条**可一次投喂的长 prompt —— 全局头（类型/时长/画幅/风格/视觉关键词/语言）→ 主体角色卡 → 全片状态弧 → 逐镜（含节拍时间轴）→ 声音设计 → 约束清单。与逐镜模式**互补**：单段适合快速出片，逐镜适合精确控制节奏与跨镜一致。
+- 复制 / 下载 Markdown（完整分镜脚本，**含 EN + 中文对照双份**，含风格、一致性锁定、每镜状态链与节拍）
+- 复制 / 下载 JSON（给后续 Mastra workflow 直接消费）
+
+> 注意：批量复制 Image/Video 只给英文（直接投喂生成模型）；要看中文说明去 Markdown 或分镜 tab 里切「中文」。
+
+### 尾帧链工作流（逐镜模式怎么串起来）
+
+按镜序**串行**生成视频 → 每镜生成后截取**最后一帧** → 下一镜用该帧作为首帧参考（图生视频），两镜动势即可无缝衔接；换场镜按各镜标注的转场方式拼接。Markdown 导出里也带这段说明。
+
+## 链路日志（/logs）
+
+每次 LLM 调用落一条 JSON 到 `.data/traces-YYYY-MM.jsonl`（按月轮转，已被 gitignore），记录：traceId、步骤、模型、**完整 prompt**、原始输出、耗时、token、报错、**降级重试次数与被剥离的参数**、**429/5xx 退避重试次数**。
+
+- 主页右上角「链路日志」进入 `/logs`：列表 → 点行进详情（system / user / 原始输出 / 错误 / 降级）→ **勾选两条记录左右并排对比**（微调前后、换模型的核心用法）→ 一键导出微调 JSONL（`messages` + `completion`）。
+- `GET /api/logs?export=1[&traceId=]` 直接下载微调数据。
+- 读取只扫日志文件**尾部若干字节**，日志长大也不会拖慢页面。
+
+## 内置风格 seed
+
+仅作**锚定**用，防纯文本自由发挥导致风格漂移（15 号文档决策 1：不引外部模板库）。
+LLM 能匹配上就匹配，匹配不上就自由定义。
+
+`tech 科技感` · `warm 温情生活` · `cinematic 电影大片` · `kawaii 萌系活泼` · `minimal 极简高级`
 
 ## 测试用广告描述
 
@@ -96,48 +143,51 @@ npm run dev          # http://localhost:3200
 每条建议的验收点：
 
 1. ② 风格卡右上角应显示命中的 seed 徽标（T6 应显示「自由定义」）；
-2. ③ 每镜 Image Prompt 不应含运动词（moving / pushing in 等），Video Prompt 应含镜头运动与动作；
-3. 任选一镜的英文 prompt 复制到生图平台，画面风格应与色板一致；
-4. 「换一套」+ 调整要求（如"更冷一点"）后，色板与关键词应发生明显变化。
-
-## 导出
-
-- 复制全部图像 Prompt(EN)（批量去生首帧图，英文生成版）
-- 复制全部视频 Prompt(EN)（批量去图生视频，已带时长与负面词）
-- 复制 / 下载 Markdown（完整分镜脚本，**含 EN + 中文对照双份**，含风格与一致性锁定）
-- 复制 / 下载 JSON（给后续 Mastra workflow 直接消费）
-
-> 注意：批量复制 Image/Video 只给英文（直接投喂生成模型）；要看中文说明去 Markdown 或分镜 tab 里切「中文」。
-
-## 内置风格 seed
-
-仅作**锚定**用，防纯文本自由发挥导致风格漂移（15 号文档决策 1：不引外部模板库）。
-LLM 能匹配上就匹配，匹配不上就自由定义。
-
-`tech 科技感` · `warm 温情生活` · `cinematic 电影大片` · `kawaii 萌系活泼` · `minimal 极简高级`
+2. ③ 每镜 Image Prompt 不应含运动词（moving / pushing in 等），Video Prompt 应含镜头运动与动作、明确时长数值；
+3. 每镜有「节拍」块，粒度随动作复杂度变化（动作镜更细、氛围镜可整镜一拍）；
+4. 相邻镜的「状态链」应首尾相接（镜 N 末状态 = 镜 N+1 首状态），转场为匹配剪辑时动势方向一致；
+5. 任选一镜的英文 prompt 复制到生图平台，画面风格应与色板一致；
+6. 「换一套」+ 调整要求（如"更冷一点"）后，色板与关键词应发生明显变化。
 
 ## 目录结构
 
 ```
 src/
   app/
-    page.tsx                 主工作台（常驻 tab：需求 / 风格 / 分镜）
-    api/style/route.ts       S1 风格匹配
-    api/shots/route.ts       S2+S3 分镜生成
+    page.tsx                 主工作台（常驻 tab：需求 / 风格 / 分镜；含 localStorage 持久化）
+    logs/page.tsx            链路日志页（列表 / 详情 / 双记录对比 / 微调导出）
+    api/style/route.ts       S1 风格匹配（含参考图提取风格路径）
+    api/shots/route.ts       S2 分镜生成（两段式 + 串行 + SSE）
+    api/shot/route.ts        单镜定点重生成（失败镜重试）
+    api/image/route.ts       风格样张生图
+    api/logs/route.ts        链路日志查询 / 微调 JSONL 导出
+    api/llm-configs/route.ts 脱敏的 LLM profile 列表（前端下拉用）
+    api/video/route.ts       视频生成透传端点（M1 预留，M0 无 UI 入口）
   components/
-    StyleCard.tsx  Timeline.tsx  ShotRow.tsx  CopyButton.tsx
+    ShotRow.tsx             单镜分镜卡（中英对照 / 台拍 / 状态链 / 复制前缀）
+    Timeline.tsx            时间轴条
+    StyleEditor.tsx         风格卡编辑
+    StyleTestImage.tsx      风格样张（生图确认）
+    ProgressModal.tsx       生成期间的全屏进度弹窗（防误触）
+    CopyButton.tsx          复制按钮
+    EditableText.tsx        失焦自动保存的可编辑文本
   lib/
-    schema.ts                StyleSpec / Shot / Storyboard（zod）
-    seed-styles.ts           5 类内置风格 seed
-    prompts.ts               两个 system prompt
-    llm.ts                   OpenAI 兼容调用 + JSON 提取 + 降级重试
-    exports.ts               Markdown / JSON / 批量 prompt 导出
+    schema.ts               StyleSpec / Shot / Storyboard / Outline（zod，全字段 catch 兜底）
+    seed-styles.ts          5 类内置风格 seed
+    prompts.ts              风格 / 大纲 / 单镜展开的 system+user prompt 与 suggestShotCount
+    llm.ts                  OpenAI 兼容调用 + JSON 提取 + 降级重试 + 429/5xx 退避 + trace 埋点
+    llm-configs.ts          多 profile 配置层（text/image/video，脱敏输出）
+    exports.ts              Markdown / JSON / 批量 prompt / 整片单 prompt 导出
+    text-utils.ts           prompt 文本后处理（整段去重）
+    trace-log.ts            链路日志落盘（按月轮转、尾部读取）
+    video.ts                视频生成客户端（mode 从配置读取，不硬编码）
+test/                       vitest 回归测试（schema / prompts / exports / trace-log / llm / text-utils / video）
 ```
 
 ## 后续里程碑衔接
 
-- **M1**：在 ③ 之后接「关键帧生图 → I2V 生视频 → 预览」，本项目的 `StyleSpec` 与 `Shot.image_prompt` 可直接复用。
-- **M3**：多分镜拼接，`consistency_notes` 即为跨镜一致性锁定的输入。
+- **M1**：在 ③ 之后接「关键帧生图 → I2V 生视频 → 预览」，本项目的 `StyleSpec` 与 `Shot.image_prompt` 可直接复用；`lib/video.ts` + `/api/video` 已把视频调用接好（补齐 `mode` 取值即可出片）。
+- **M3**：多分镜拼接，`consistency_notes` + 状态链即为跨镜一致性锁定的输入。
 - 接 Mastra 时，`/api/style`、`/api/shots` 两个 route 的 prompt 与 schema 可原样搬进 workflow step。
 
 ## 常见问题
@@ -146,5 +196,9 @@ src/
 |---|---|
 | 页面红条提示「未配置 LLM_API_KEY…」 | `.env.local` 没填或填了占位值，改完要**重启** dev server |
 | 502 + 401/403 | Key 或 BaseURL 不对，用 curl 先验一下中转站是否通 |
+| 502 + 429 | 上游限流。已内置 429/5xx 指数退避重试（默认 3 次、尊重 `Retry-After`，可用 `LLM_MAX_ATTEMPTS` 调整）；免费档 1 次/分钟的站点建议改用付费档 |
 | 422「模型输出不是合法 JSON」 | 该模型 JSON 能力弱，换一个模型（建议 gpt-4o 级别及以上） |
 | 504 超时 | 分镜较长，`LLM_TIMEOUT_MS` 默认 180s，可调大 |
+| 参考图模式下选不到某个模型 | 该 profile 配了 `"vision": false`（纯文本模型），换支持视觉的模型 |
+| 想比较两次生成差异 | 打开 `/logs`，勾选两条记录做左右对比 |
+| 页面状态想清空 | 分镜页右下角「清空进度」（等价于清 localStorage 的 `video-flow:workbench:v1`） |

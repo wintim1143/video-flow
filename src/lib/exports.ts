@@ -19,7 +19,7 @@ export function allVideoPrompts(storyboard: Storyboard, globalNegative: string):
     storyboard.shots
       .map(
         (s) =>
-          `#${s.index} [${formatTimecode(s.start)}-${formatTimecode(s.start + s.duration)}] 本镜 ${s.duration}s\n${s.video_prompt}${s.beats?.length ? `\nSecond-by-second beats: ${s.beats.join(" | ")}` : ""}\nNegative: ${[globalNegative, s.negative_prompt].filter(Boolean).join(", ")}`
+          `#${s.index} [${formatTimecode(s.start)}-${formatTimecode(s.start + s.duration)}] 本镜 ${s.duration}s\n${s.video_prompt}${s.beats?.length ? `\nBeats: ${s.beats.join(" | ")}` : ""}\nNegative: ${[globalNegative, s.negative_prompt].filter(Boolean).join(", ")}`
       )
       .join("\n\n")
   );
@@ -35,14 +35,17 @@ function shotMd(s: Shot, globalNegative: string): string {
   ];
   if (s.voiceover) lines.push(`- 口播/字幕：${s.voiceover}`);
   if (s.audio) lines.push(`- 音频：${s.audio}`);
+  if (s.start_state || s.end_state) {
+    lines.push(`- 状态链：${s.start_state || "—"} → ${s.end_state || "—"}`);
+  }
   lines.push(`- 转场：${s.transition_out}`, "");
   lines.push(`**Image Prompt · 首帧生图（EN）**`, "```", s.image_prompt, "```");
   if (s.image_prompt_cn) lines.push(`**Image Prompt 中文对照**`, "```", s.image_prompt_cn, "```");
   lines.push(`**Video Prompt · 图生视频（EN）**`, "```", s.video_prompt, "```");
   if (s.video_prompt_cn)   lines.push(`**Video Prompt 中文对照**`, "```", s.video_prompt_cn, "```");
   if (s.beats?.length) {
-    lines.push(`**秒级节拍（EN）**`, "```", ...s.beats, "```");
-    if (s.beats_cn?.length) lines.push(`**秒级节拍 中文对照**`, "```", ...s.beats_cn, "```");
+    lines.push(`**节拍（EN）**`, "```", ...s.beats, "```");
+    if (s.beats_cn?.length) lines.push(`**节拍 中文对照**`, "```", ...s.beats_cn, "```");
   }
   lines.push(
     `**Negative（EN）**`,
@@ -100,4 +103,110 @@ export function toMarkdown(storyboard: Storyboard, style: StyleSpec): string {
     ...head,
     ...storyboard.shots.map((s) => shotMd(s, storyboard.global_negative)),
   ].join("\n");
+}
+
+/**
+ * 整片单 prompt：按「整片模式」视频模型（Seedance / MiniMax h3 / 即梦长视频）的惯用结构，
+ * 把整条分镜拼成**一条**可直接投喂的长 prompt —— 全局头 → 主体角色卡 → 转场前后状态 →
+ * 逐镜（含节拍时间轴）→ 声音设计 → 约束清单。与逐镜模式互补，不改动逐镜工作流。
+ */
+export function wholeVideoPrompt(
+  storyboard: Storyboard,
+  style: StyleSpec,
+  opts?: {
+    /** 大纲产出的实体档案（锁定主体外观描述）；Storyboard 本身不存此字段，由页面传入 */
+    entities?: Array<{ name_zh: string; descriptor_en: string }>;
+    /** 片型，默认「广告片（Commercial）」 */
+    type?: string;
+  }
+): string {
+  const m = storyboard.meta;
+  const shots = storyboard.shots;
+  const total = shots.reduce((acc, s) => acc + s.duration, 0);
+  const voices = shots.map((s) => s.voiceover).filter(Boolean);
+  const lines: string[] = [];
+
+  /* ── 全局头 ── */
+  lines.push(
+    `【类型】${opts?.type ?? "广告片（Commercial）"}`,
+    `【时长】约 ${total.toFixed(1)} 秒`,
+    `【画幅】${m.aspect_ratio}${m.aspect_ratio === "9:16" ? " 竖屏" : m.aspect_ratio === "16:9" ? " 横屏" : " 方形"}`,
+    `【风格】${style.name_zh}${style.name_en ? `（${style.name_en}）` : ""}：${style.style}；色彩 ${style.color}；光照 ${style.lighting}；构图 ${style.composition}；材质 ${style.materials}；镜头 ${style.camera}`,
+    `【视觉关键词】${style.keywords_en.join(", ")}`,
+    `【色板】${style.palette.join(" · ")}`,
+    `【语言】${voices.length ? "有口播，见各镜" : "无对白，无字幕"}`,
+    ""
+  );
+
+  /* ── 主体角色卡 ── */
+  lines.push("【主体角色卡】（跨镜必须保持完全一致，禁止换脸 / 换造型 / 变形）");
+  if (opts?.entities?.length) {
+    for (const e of opts.entities) lines.push(`- ${e.name_zh}：${e.descriptor_en}`);
+  } else {
+    lines.push("- （大纲未产出实体档案，请以各镜 prompt 中的主体描述为准）");
+  }
+  if (storyboard.consistency_notes.length) {
+    for (const n of storyboard.consistency_notes) lines.push(`- 锁定项：${n}`);
+  }
+  lines.push("");
+
+  /* ── 全片状态：首镜镜首 → 末镜镜末 ── */
+  const first = shots[0];
+  const last = shots[shots.length - 1];
+  if (first?.start_state || last?.end_state) {
+    lines.push("【全片状态弧】");
+    if (first?.start_state) lines.push(`开场状态：${first.start_state}`);
+    if (last?.end_state) lines.push(`收场状态：${last.end_state}`);
+    lines.push("");
+  }
+
+  /* ── 逐镜（含节拍时间轴）── */
+  lines.push("【镜头与时间轴】", "");
+  for (const s of shots) {
+    lines.push(
+      `[${formatTimecode(s.start)}-${formatTimecode(s.start + s.duration)}] 镜头${s.index}｜${s.shot_type}｜${s.camera_movement}`
+    );
+    lines.push(`场景：${s.scene}`);
+    if (s.subject) lines.push(`主体：${s.subject}`);
+    if (s.action) lines.push(`动作：${s.action}`);
+    if (s.start_state || s.end_state) {
+      lines.push(`状态：${s.start_state || "—"} → ${s.end_state || "—"}`);
+    }
+    if (s.beats?.length) {
+      lines.push("时间轴：");
+      for (const b of s.beats) lines.push(`  ${b}`);
+    }
+    lines.push(`画面：${s.image_prompt}`);
+    lines.push(`运动：${s.video_prompt}`);
+    lines.push(`转场：${s.transition_out || "—"}`);
+    lines.push("");
+  }
+
+  /* ── 声音设计 ── */
+  const audios = shots.filter((s) => s.audio);
+  if (audios.length) {
+    lines.push("【声音设计】");
+    for (const s of audios) lines.push(`- ${formatTimecode(s.start)} 镜头${s.index}：${s.audio}`);
+    if (voices.length) {
+      for (const s of shots.filter((x) => x.voiceover)) lines.push(`- 口播｜镜头${s.index}：${s.voiceover}`);
+    }
+    lines.push("");
+  }
+
+  /* ── 约束清单 ── */
+  const negs = Array.from(
+    new Set(
+      [storyboard.global_negative, ...shots.map((s) => s.negative_prompt)]
+        .join(",")
+        .split(/[,，]/)
+        .map((x) => x.trim())
+        .filter(Boolean)
+    )
+  );
+  if (negs.length) {
+    lines.push("【主要约束】（负向清单，生成时禁止出现）");
+    lines.push(negs.join(", "));
+  }
+
+  return lines.join("\n");
 }

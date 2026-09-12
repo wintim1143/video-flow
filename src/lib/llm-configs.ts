@@ -29,6 +29,11 @@ export interface LlmProfile {
    * 参考图提取风格时前端不可选、服务端拒绝。
    */
   vision?: boolean;
+  /**
+   * video 专用：视频生成接口要求的 mode 取值（如 Agnes Video 的 text / image 模式）。
+   * 各平台取值不同且文档各异，因此不在代码里硬编码，由配置提供；缺失时 /api/video 明确报错。
+   */
+  mode?: string;
 }
 
 export type LlmConfig = Record<LlmKind, LlmProfile[]>;
@@ -44,6 +49,7 @@ interface RawProfile {
   endpoint?: unknown;
   reasoningEffort?: unknown;
   vision?: unknown;
+  mode?: unknown;
 }
 
 function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
@@ -66,6 +72,7 @@ function normalizeList(raw: unknown, kind: LlmKind): LlmProfile[] {
         typeof o.reasoningEffort === "string" && o.reasoningEffort.trim() ? o.reasoningEffort.trim() : undefined,
       /* 仅显式 false 才标记纯文本；缺省按支持处理（向后兼容） */
       vision: o.vision === false ? false : undefined,
+      mode: typeof o.mode === "string" && o.mode.trim() ? o.mode.trim() : undefined,
     });
   });
   return out;

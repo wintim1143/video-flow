@@ -27,5 +27,15 @@
       "endpoint": "/images/generations"
     }
   ],
-  "video": []
+  "video": [
+    {
+      "id": "video-1",
+      "name": "Agnes Video 2.5 Flash（M1 预留，M0 无 UI 入口）",
+      "baseURL": "https://apihub.agnes-ai.com/v1",
+      "apiKey": "sk-你的key",
+      "model": "agnes-video-2.5-flash",
+      "endpoint": "/videos",
+      "mode": "取值见服务商文档（该平台必填，缺失时 /api/video 会报 MODE_MISSING）"
+    }
+  ]
 }

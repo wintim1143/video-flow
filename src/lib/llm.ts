@@ -11,11 +11,60 @@ export type LLMErrorCode = "CONFIG_MISSING" | "UPSTREAM" | "PARSE" | "TIMEOUT";
 export class LLMError extends Error {
   code: LLMErrorCode;
   detail?: string;
-  constructor(code: LLMErrorCode, message: string, detail?: string) {
+  /** 上游 HTTP 状态码（仅 UPSTREAM 时有值），退避重试据此判定 */
+  status?: number;
+  /** 上游 Retry-After 声明的等待毫秒数（若有） */
+  retryAfterMs?: number;
+  constructor(code: LLMErrorCode, message: string, detail?: string, status?: number, retryAfterMs?: number) {
     super(message);
     this.code = code;
     this.detail = detail;
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/** 上游限流/服务端故障的退避重试次数（含首次尝试）；429/5xx 适用 */
+const MAX_ATTEMPTS = Math.max(1, Number(process.env.LLM_MAX_ATTEMPTS ?? 3));
+/** 退避基数（毫秒），按 2^wave 递增并封顶 */
+const RETRY_BASE_MS = Math.max(0, Number(process.env.LLM_RETRY_BASE_MS ?? 800));
+const RETRY_CAP_MS = 8_000;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * 是否值得重试：429（限流）、5xx（上游故障）、以及无状态码的网络层错误。
+ * 400/401/403/404 等客户端错误永不重试（重试也没用，交给降级队列处理）。
+ */
+function isRetriable(err: unknown): boolean {
+  if (err instanceof LLMError) {
+    if (err.code === "TIMEOUT") return true; // 超时可能只是抖动
+    const st = err.status ?? 0;
+    if (st === 429) return true;
+    if (st >= 500 && st < 600) return true;
+    return false;
+  }
+  // fetch 网络异常（DNS/连接重置等）
+  return true;
+}
+
+function retryWaitMs(err: unknown, wave: number): number {
+  const hinted = err instanceof LLMError ? err.retryAfterMs : undefined;
+  if (hinted && hinted > 0) return Math.min(hinted, RETRY_CAP_MS);
+  const backoff = RETRY_BASE_MS * 2 ** wave;
+  // 测试里把基数设为 0 时也要保持总等待为 0（不抖到 200ms）
+  const jitter = RETRY_BASE_MS > 0 ? Math.random() * 200 : 0;
+  return Math.min(backoff + jitter, RETRY_CAP_MS);
+}
+
+/** 解析 Retry-After：支持秒数与 HTTP 日期两种格式 */
+function parseRetryAfter(raw: string | null): number | undefined {
+  if (!raw) return undefined;
+  const sec = Number(raw.trim());
+  if (Number.isFinite(sec)) return Math.max(0, sec * 1000);
+  const at = Date.parse(raw);
+  if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
+  return undefined;
 }
 
 /** 取文本 LLM profile；未配置抛 CONFIG_MISSING（含指引） */
@@ -83,7 +132,13 @@ async function callChat(
 
   if (!res.ok) {
     const raw = await res.text().catch(() => "");
-    throw new LLMError("UPSTREAM", `LLM 返回 ${res.status}`, raw.slice(0, 800));
+    throw new LLMError(
+      "UPSTREAM",
+      `LLM 返回 ${res.status}`,
+      raw.slice(0, 800),
+      res.status,
+      parseRetryAfter(res.headers.get("retry-after"))
+    );
   }
 
   const data = (await res.json()) as {
@@ -158,6 +213,8 @@ export async function chatJSON<T>(params: {
   /* 链路追踪：记录尝试次数 / 降级参数 / 总耗时，调用结束后落一条日志 */
   const t0 = performance.now();
   let attempts = 0;
+  /** 因 429/5xx/超时而发起的退避重试次数（参数不变，只重发） */
+  let retries = 0;
   const degraded: string[] = [];
   const userText = flattenUserContent(userContent);
   const writeLog = (ok: boolean, extra: { raw?: string; error?: string; usage?: LlmUsage | null }) => {
@@ -171,6 +228,7 @@ export async function chatJSON<T>(params: {
       temperature,
       hasImage: !!params.imageUrl,
       attempts,
+      retries,
       degraded,
       ok,
       latencyMs: Math.round(performance.now() - t0),
@@ -193,14 +251,26 @@ export async function chatJSON<T>(params: {
     const queue: Array<{ jsonMode: boolean; effort?: string }> = [{ jsonMode: true, effort }];
     while (queue.length) {
       const v = queue.shift() as { jsonMode: boolean; effort?: string };
-      attempts++;
+      let r: { content: string; usage: LlmUsage | null };
       try {
-        const r = await callChat(profile, messages, {
-          jsonMode: v.jsonMode,
-          reasoningEffort: v.effort,
-          temperature,
-          signal: AbortSignal.timeout(timeoutMs),
-        });
+        /* 同一组参数内先做退避重试（429/5xx/超时），再交由降级队列处理参数问题 */
+        r = await (async () => {
+          for (let wave = 0; ; wave++) {
+            attempts++;
+            try {
+              return await callChat(profile, messages, {
+                jsonMode: v.jsonMode,
+                reasoningEffort: v.effort,
+                temperature,
+                signal: AbortSignal.timeout(timeoutMs),
+              });
+            } catch (err) {
+              if (!isRetriable(err) || wave >= MAX_ATTEMPTS - 1) throw err;
+              retries++;
+              await sleep(retryWaitMs(err, wave));
+            }
+          }
+        })();
         content = r.content;
         usage = r.usage;
         break;

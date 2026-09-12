@@ -94,73 +94,7 @@ ${input.brief.trim()}`
     : "请分析这张参考图的视觉风格，输出风格规格 JSON。";
 }
 
-/** S2+S3 合并：润色 + 分镜（15 号 §6.1 的 S2/S3，但不出图，只产 prompt） */
-export function shotsSystemPrompt(): string {
-  return `你是资深广告分镜师（Storyboard Artist）兼提示词工程师。任务：基于已确认的风格规格，把广告需求拆成一组可直接投喂给生图模型与生视频模型的分镜。
-
-硬规则（违反即判失败）：
-1. **一镜一动作**：每个 shot 只写一个主体动作，禁止一个镜头塞多个动作或多次转场。
-2. **首帧优先**：image_prompt 只写**静态画面**——主体外观 + 环境 + 构图 + 光线 + 材质 + 风格关键词。**绝对不能**出现运动、时间流逝、镜头运动类词汇（如 moving、pushing in、slowly、camera）。
-3. **video_prompt** = 该镜的静态描述 + 镜头运动（英文）+ 主体动作（英文）+ 时长约束，写成一整段英文自然句，40-80 词。
-4. **一致性锁定**：每一镜的 image_prompt 与 video_prompt 都必须 **verbatim 带上风格 keywords_en 的全部关键词**，且 consistency_notes 里锁定的主体/产品属性（如发色、服装、产品造型、Logo 位置）必须逐字相同，不得改写或近义替换。
-5. **语言隔离**：英文版 image_prompt / video_prompt / negative_prompt 必须全英文（投喂生成模型用）；中文版 image_prompt_cn / video_prompt_cn / negative_prompt_cn 必须是英文版的**逐句准确翻译**（中文，供界面对照与人工校准），不得意译丢失生图技术细节（如景别、光位、镜头运动、材质词）。scene / subject / action / voiceover / transition_out 等字段始终中文。
-6. **时长分配**：单镜 3-8 秒，所有 duration 之和 = target_duration（允许 ±10%）。start 从 0 开始严格累加。
-7. **叙事结构**：首镜建立场景/抛出痛点，中段展示产品与效果，末镜必须有品牌落版或行动号召（CTA）。
-8. voiceover 写中文口播或字幕文案；纯氛围镜头可填空字符串 ""。audio 写音乐/音效方向。
-9. transition_out 写到下一镜的转场方式（硬切 / 叠化 / 匹配剪辑 / 甩镜 等），最后一个镜头填 "—"。
-10. shots_count 必须等于 shots 数组长度。
-
-输出要求：**只输出纯 JSON 对象**，不要 markdown 代码围栏，不要任何解释文字。结构严格如下：
-{
-  "meta": { "title": "", "aspect_ratio": "9:16", "target_duration": 30, "shots_count": 6 },
-  "shots": [
-    {
-      "index": 1,
-      "start": 0,
-      "duration": 5,
-      "shot_type": "景别（中文，如 特写/中景/全景）",
-      "camera_movement": "镜头运动（中文，如 缓慢推近/固定机位）",
-      "scene": "场景环境（中文）",
-      "subject": "主体及其锁定属性（中文）",
-      "action": "本镜唯一动作（中文）",
-      "voiceover": "中文口播/字幕",
-      "audio": "音乐与音效",
-      "transition_out": "到下一镜的转场",
-      "image_prompt": "English static frame description, 30-60 words",
-      "video_prompt": "English motion description with camera movement, 40-80 words",
-      "negative_prompt": "English negative words",
-      "image_prompt_cn": "中文 · image_prompt 的准确翻译（逐句对应英文，用于界面对照展示）",
-      "video_prompt_cn": "中文 · video_prompt 的准确翻译（逐句对应英文，用于界面对照展示）",
-      "negative_prompt_cn": "中文 · negative_prompt 的准确翻译"
-    }
-  ],
-  "global_negative": "全片统一英文负面词",
-  "consistency_notes": ["跨镜必须逐字保持一致的属性"]
-}`;
-}
-
-export function shotsUserPrompt(input: {
-  brief: string;
-  aspectRatio: string;
-  targetDuration: number;
-  style: StyleSpec;
-  shotCount: number;
-}): string {
-  return `【广告需求】
-${input.brief}
-
-【已确认的风格规格】（逐镜必须沿用其 keywords_en 与视觉设定）
-${JSON.stringify(input.style, null, 2)}
-
-【约束】
-- 画幅：${input.aspectRatio}
-- 目标总时长：${input.targetDuration} 秒
-- 分镜数量：${input.shotCount} 个（必须严格产出 ${input.shotCount} 个 shot）
-
-请输出分镜 JSON。`;
-}
-
-/** 按时长推算镜数：单镜 5 秒左右（14 号 §2.2 社区惯例） */
+/** 按时长推算镜数：单镜 5 秒左右（14 号 §2.2 社区惯例）。前端与 route 共用，禁止在别处重复实现 */
 export function suggestShotCount(targetDuration: number): number {
   const n = Math.round(targetDuration / 5);
   return Math.min(24, Math.max(2, n));
@@ -237,7 +171,7 @@ export function shotDetailSystemPrompt(): string {
 7. transition_out **照抄大纲给定的本镜转场值，不得改写**；仅当大纲未给时才自行填写（硬切 / 叠化 / 匹配剪辑 / 甩镜 等），最后一个镜头填 "—"。
 8. audio 写本镜音乐/音效方向（中文）。camera_movement 写镜头运动（中文）。
 9. **转场衔接（尾帧链）**：若大纲转场为匹配剪辑/首尾帧衔接（与下一镜同场景连续），本镜 video_prompt 的**最后一帧必须就是 end_state 的画面**，且动作的动势方向（旋转/移动/转身）要与下一镜首帧的动作方向相匹配，使两段视频拼接时动势延续；image_prompt（首帧）必须与上一镜的末帧在构图、主体姿态上可直接衔接。若为换场转场（硬切/叠化），video_prompt 自然收尾即可，无需强行匹配。
-10. **秒级节拍（beats）**：把本镜 duration 按**每一秒一拍**拆成节拍数组（duration 不足 2 秒拆 2 拍，末拍可短于 1 秒，时间段必须连续覆盖 0 → duration）。每拍只写**一个连续的小动作**（主体姿态/位置/镜头在该时段的精确变化），首拍必须从 start_state 出发、末拍必须结束于 end_state，拍与拍之间的状态要能直接接续。video_prompt 正文按 beats 的顺序把动作串成自然句，但**禁止再出现 "0-3s" 这类粗粒度时间段描述**——节奏控制完全交给 beats。beats_cn 为 beats 的逐拍准确中文翻译。
+10. **节拍（beats，粒度自适应）**：beats 把本镜 duration 切成若干动作拍，**粒度由本镜动作复杂度决定，不固定每秒一拍**——动作密集、姿态变化丰富的镜可细化到 0.5 秒级（如 "0-0.5s: ..."）；动作单一、静态氛围的镜可以整镜一拍或两拍。硬约束：① 时间段必须连续覆盖 0 → duration（末拍可短）；② 每拍只写**一个连续的小动作**（主体姿态/位置/镜头在该时段的精确变化）；③ 首拍必须从 start_state 出发、末拍必须结束于 end_state，拍与拍之间的状态要能直接接续；④ video_prompt 正文按 beats 顺序把动作串成自然句，节拍粒度小于 1 秒时保留精确时间戳，整镜单拍时不必写时间戳。beats_cn 为 beats 的逐拍准确中文翻译。
 
 输出要求：**只输出纯 JSON 对象**（单镜对象，不是数组），不要 markdown 围栏，不要解释。结构严格如下：
 {

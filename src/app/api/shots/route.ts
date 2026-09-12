@@ -1,6 +1,7 @@
 import { ShotsRequestSchema, OutlineSchema, ShotSchema, type Shot } from "@/lib/schema";
 import { chatJSON, LLMError } from "@/lib/llm";
 import { newTraceId } from "@/lib/trace-log";
+import { dedupeRepeats } from "@/lib/text-utils";
 import {
   outlineSystemPrompt,
   outlineUserPrompt,
@@ -145,6 +146,9 @@ export async function POST(req: Request) {
             end_state: item.end_state || shot.end_state,
             /* 转场设计同样以大纲为准（大纲阶段统一规划，防止逐镜自由发挥导致生硬跳切） */
             transition_out: item.transition_out || shot.transition_out,
+            /* keywords_en verbatim 注入常与场景描述重叠 → 去掉整段重复 */
+            image_prompt: dedupeRepeats(shot.image_prompt),
+            video_prompt: dedupeRepeats(shot.video_prompt),
           };
           const validated = ShotSchema.parse(fixed);
           shots.push(validated);

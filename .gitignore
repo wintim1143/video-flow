@@ -16,3 +16,4 @@ llm.config.json
 *.tsbuildinfo
 next-env.d.ts
 .probe/
+coverage/
