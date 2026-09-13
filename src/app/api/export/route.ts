@@ -42,6 +42,8 @@ const BodySchema = z.object({
     )
     .max(60)
     .default([]),
+  /** 指定归档子目录名（M3a 拼接会把产物先落到某个 runId，归档时复用同一目录） */
+  runId: z.string().regex(SAFE_NAME, "runId 只允许字母/数字/点/下划线/横线").optional(),
 });
 
 export async function POST(req: Request) {
@@ -59,7 +61,7 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
-  const { files, assets } = parsed.data;
+  const { files, assets, runId } = parsed.data;
   if (!files.length && !assets.length) {
     return NextResponse.json({ ok: false, code: "BAD_INPUT", message: "没有要归档的内容" }, { status: 400 });
   }
@@ -67,7 +69,7 @@ export async function POST(req: Request) {
   const root = process.env.ARTIFACT_DIR ?? path.join(process.cwd(), ".data", "artifacts");
 
   try {
-    const manifest = await archiveArtifacts({ root, runId: archiveRunId(), files, assets });
+    const manifest = await archiveArtifacts({ root, runId: runId ?? archiveRunId(), files, assets });
     return NextResponse.json({
       ok: true,
       ...manifest,

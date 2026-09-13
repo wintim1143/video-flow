@@ -2,17 +2,17 @@
 
 import { useEffect, useState } from "react";
 import type { Shot } from "@/lib/schema";
-import { MAX_KEYFRAME_ATTEMPTS, keyframeSizeFor } from "@/lib/use-keyframes";
+import { MAX_KEYFRAME_ATTEMPTS, endKeyframePrompt, keyframeSizeFor } from "@/lib/use-keyframes";
 import { EditableText } from "./EditableText";
 
 /**
- * 闸门 2 · 关键帧（单镜）。
+ * 闸门 2 · 关键帧（单镜，含首帧 + S3 尾帧）。
  *
  * M1 的核心链路是「先生关键帧 → 再图生视频」，而不是一步文生视频：
  * 首帧锁死了主体的外观与构图，运动部分才交给视频模型，跨镜一致性才有锚点。
  *
- * 这里负责：用 `Shot.image_prompt`（可改）出一张图 → 存回 `Shot.keyframe_url`
- * → `buildPayload` 自动把它作为 `first_frame` 传给视频接口。
+ * S3 共享端点帧在此基础上补了尾帧：本镜 end_state 派生的收尾图作视频 `last_frame`，
+ * 同时**复用为下一镜的 `first_frame`** —— 接缝两侧锚定同一张图，跨镜连续性由此保证。
  */
 export function KeyframeBar({
   shot,
@@ -22,6 +22,10 @@ export function KeyframeBar({
   error,
   onGenerate,
   onClear,
+  endBusy,
+  endError,
+  onGenerateEnd,
+  onClearEnd,
 }: {
   shot: Shot;
   aspectRatio?: string;
@@ -31,6 +35,11 @@ export function KeyframeBar({
   error?: string;
   onGenerate: (prompt: string) => void;
   onClear: () => void;
+  /** 尾帧（S3）：独立 busy / error / 计数，与首帧互不干扰 */
+  endBusy: boolean;
+  endError?: string;
+  onGenerateEnd: (prompt: string) => void;
+  onClearEnd: () => void;
 }) {
   const fallbackPrompt = shot.image_prompt || shot.video_prompt || "";
   const [prompt, setPrompt] = useState(fallbackPrompt);
@@ -56,6 +65,19 @@ export function KeyframeBar({
   const attempts = shot.keyframe_attempts ?? 0;
   const regens = Math.max(0, attempts - 1);
   const capped = attempts >= MAX_KEYFRAME_ATTEMPTS && !unlocked;
+
+  /* ── 尾帧（S3 共享端点帧）：prompt 默认由 end_state 派生，独立计数与解锁 ── */
+  const endFallbackPrompt = endKeyframePrompt(shot);
+  const [endPrompt, setEndPrompt] = useState(endFallbackPrompt);
+  const [endTouched, setEndTouched] = useState(false);
+  useEffect(() => {
+    if (!endTouched) setEndPrompt(endFallbackPrompt);
+  }, [endFallbackPrompt, endTouched]);
+  const endSettled = Boolean(shot.end_keyframe_url);
+  const [endUnlocked, setEndUnlocked] = useState(false);
+  const endAttempts = shot.end_keyframe_attempts ?? 0;
+  const endRegens = Math.max(0, endAttempts - 1);
+  const endCapped = endAttempts >= MAX_KEYFRAME_ATTEMPTS && !endUnlocked;
 
   return (
     <div
@@ -187,6 +209,120 @@ export function KeyframeBar({
             </div>
           </div>
         </details>
+      ) : null}
+
+      {/* ── 尾帧（S3 共享端点帧）：本镜视频的 last_frame，同时是下一镜的 first_frame 来源 ── */}
+      {enabled ? (
+        <div className="mt-3 border-t border-[var(--border)] pt-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[12px] font-medium" style={{ color: endSettled ? "var(--accent-2)" : "var(--muted)" }}>
+              尾帧 · 收尾锚
+            </span>
+            {endSettled ? (
+              <span className="chip mono text-[11px]" style={{ color: "var(--accent-2)" }}>
+                已就位 · 本镜终点 + 下一镜起点
+              </span>
+            ) : (
+              <span className="chip mono text-[11px] text-[var(--muted)]">未生成 · 接缝无视觉锚</span>
+            )}
+            {endRegens > 0 ? (
+              <span className="chip mono text-[11px]" style={{ color: endCapped ? "var(--err)" : "var(--muted)" }}>
+                已重出 {endRegens}/{MAX_KEYFRAME_ATTEMPTS - 1}
+              </span>
+            ) : null}
+            <span className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                className="btn"
+                disabled={endBusy || !endPrompt.trim() || endCapped}
+                title={endCapped ? `尾帧已达重出上限（${MAX_KEYFRAME_ATTEMPTS - 1} 次）。确认要继续请点「解除限制」。` : undefined}
+                onClick={() => onGenerateEnd(endPrompt)}
+              >
+                {endBusy ? "生成中…" : endSettled ? "重新生成尾帧" : "生成尾帧"}
+              </button>
+              {endCapped ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setEndUnlocked(true)}
+                  title="超出 R3.2 判据（重出 ≤2 次）继续生成，会消耗图片配额"
+                >
+                  解除限制
+                </button>
+              ) : null}
+              {endSettled ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={onClearEnd}
+                  title="仅清除本镜尾帧；下一镜的首帧锚会退回它自己的关键帧"
+                >
+                  清除
+                </button>
+              ) : null}
+            </span>
+          </div>
+          <div className="mt-1.5 text-[11px] leading-relaxed text-[var(--muted)]">
+            尾帧 = 本镜收尾画面（由 end_state 派生），作本镜视频的 <code className="mono">last_frame</code>；
+            同时被下一镜复用为 <code className="mono">first_frame</code> —— 接缝两侧锚定同一张图，跨镜连续性由此保证。
+            除末镜外建议每镜都出。
+          </div>
+          {endError ? (
+            <div className="mt-2 text-[12px] leading-relaxed" style={{ color: "var(--err)" }}>
+              {endError}
+            </div>
+          ) : null}
+          {endCapped ? (
+            <div className="mt-2 text-[11.5px] leading-relaxed" style={{ color: "var(--err)" }}>
+              尾帧已重出 {endRegens} 次，达到上限（{MAX_KEYFRAME_ATTEMPTS - 1} 次）。确认继续就点「解除限制」。
+            </div>
+          ) : null}
+          {endSettled ? (
+            <div className="mt-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={shot.end_keyframe_url}
+                alt={`第 ${shot.index} 镜尾帧`}
+                className="max-h-[280px] w-auto rounded-md border border-[var(--border)]"
+              />
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <a className="btn" href={shot.end_keyframe_url} target="_blank" rel="noreferrer">
+                  打开原图
+                </a>
+                <a className="btn" href={shot.end_keyframe_url} download={`shot-${shot.index}-end-keyframe.png`}>
+                  下载
+                </a>
+              </div>
+            </div>
+          ) : null}
+          <details className="mt-2">
+            <summary className="cursor-pointer text-[11.5px] text-[var(--muted)]">
+              尾帧 prompt（默认由 end_state 派生，可改）
+            </summary>
+            <div className="mt-2">
+              <EditableText
+                value={endPrompt}
+                onCommit={(v) => {
+                  setEndTouched(true);
+                  setEndPrompt(v);
+                }}
+                rows={3}
+              />
+              <div className="mt-1.5">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setEndTouched(false);
+                    setEndPrompt(endFallbackPrompt);
+                  }}
+                >
+                  按 end_state 重置
+                </button>
+              </div>
+            </div>
+          </details>
+        </div>
       ) : null}
     </div>
   );

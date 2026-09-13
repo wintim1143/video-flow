@@ -26,6 +26,13 @@ function secs(ms: number): number {
   return Math.max(0, Math.ceil(ms / 1000));
 }
 
+/** 已等待时长：60s 内显示「45s」，超过显示「2分05秒」 */
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}分${String(s % 60).padStart(2, "0")}秒`;
+}
+
 /**
  * 单镜视频生成条。
  *
@@ -41,6 +48,7 @@ export function VideoGenBar({
   enabled,
   disabled,
   createReadyAt,
+  prevEndKeyframeUrl,
   onCreate,
   onRemove,
   onRefresh,
@@ -54,6 +62,8 @@ export function VideoGenBar({
   disabled?: boolean;
   /** 生成配额的全局冷却结束时间戳（账户级，所有分镜共用） */
   createReadyAt?: number;
+  /** 上一镜的收尾帧 URL（S3 共享端点帧）：存在时优先于本镜首帧作 first_frame */
+  prevEndKeyframeUrl?: string;
   onCreate: (payload: CreateVideoPayload) => void;
   onRemove: () => void;
   onRefresh: () => void;
@@ -71,7 +81,6 @@ export function VideoGenBar({
   if (!enabled) return null;
 
   const pending = task && !settled;
-  const waitMs = task && pending ? task.nextPollAt - Date.now() : 0;
   const coolMs = Math.max(0, (createReadyAt ?? 0) - Date.now());
 
   return (
@@ -82,14 +91,23 @@ export function VideoGenBar({
         </span>
         <span
           className="chip mono text-[11px]"
-          style={{ color: shot.keyframe_url ? "var(--accent)" : "var(--muted)" }}
+          style={{
+            color: shot.keyframe_url || prevEndKeyframeUrl ? "var(--accent)" : "var(--muted)",
+          }}
           title={
-            shot.keyframe_url
-              ? "已带关键帧首帧，走图生视频（keyframe 模式）"
-              : "未生成关键帧，将走纯文生视频；建议先在闸门 2 出一张首帧，主体一致性更稳"
+            prevEndKeyframeUrl
+              ? "首帧 = 上一镜收尾帧（共享端点帧，接缝连续）；尾帧 = 本镜收尾帧（若有）"
+              : shot.keyframe_url
+                ? "已带本镜关键帧首帧，走图生视频（keyframe 模式）"
+                : "未生成任何关键帧，将走纯文生视频；建议先在闸门 2 出图"
           }
         >
-          {shot.keyframe_url ? "I2V · 首帧已带" : "文生视频 · 无首帧"}
+          {prevEndKeyframeUrl
+            ? "I2V · 首帧=上一镜尾帧"
+            : shot.keyframe_url
+              ? "I2V · 首帧=本镜关键帧"
+              : "文生视频 · 无首帧"}
+          {shot.end_keyframe_url ? " · 尾帧已锚" : ""}
         </span>
         {task ? (
           <span className="chip mono text-[11px]" style={{ color: STATUS_COLOR[task.status] }}>
@@ -99,8 +117,8 @@ export function VideoGenBar({
             {task.mode ? ` · ${task.mode}` : ""}
           </span>
         ) : null}
-        {pending && waitMs > 0 ? (
-          <span className="text-[11px] text-[var(--muted)]">下次查询 {secs(waitMs)}s 后</span>
+        {task && pending ? (
+          <span className="text-[11px] text-[var(--muted)]">已等待 {fmtElapsed(Date.now() - task.createdAt)}</span>
         ) : null}
         {coolMs > 0 ? (
           <span className="text-[11px]" style={{ color: "var(--muted)" }}>
@@ -119,7 +137,7 @@ export function VideoGenBar({
             className="btn btn-primary"
             disabled={disabled || coolMs > 0 || !shot.video_prompt?.trim()}
             title={coolMs > 0 ? `生成配额冷却中，约 ${secs(coolMs)}s 后可再次生成` : undefined}
-            onClick={() => onCreate(buildShotVideoPayload(shot, aspectRatio, globalNegative))}
+            onClick={() => onCreate(buildShotVideoPayload(shot, aspectRatio, globalNegative, prevEndKeyframeUrl))}
           >
             {coolMs > 0 ? `冷却 ${secs(coolMs)}s` : task ? "重新生成" : "生成视频"}
           </button>
@@ -130,6 +148,30 @@ export function VideoGenBar({
           ) : null}
         </span>
       </div>
+
+      {/* 进行中：进度条 + 人话状态。排队和生成都可能持续几分钟，必须让用户确信「在跑」 */}
+      {task && pending ? (
+        <div className="mt-2.5">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--border)]">
+            {typeof task.progress === "number" && task.status === "running" ? (
+              <div
+                className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${Math.min(100, Math.max(3, task.progress))}%`, background: "var(--accent-2)" }}
+              />
+            ) : (
+              <div className="vf-indet h-full w-1/4 rounded-full" style={{ background: "var(--accent-2)" }} />
+            )}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--muted)]">
+            <span>
+              {task.status === "queued"
+                ? "已建任务 · 上游排队中（免费档高峰通常要等 1–3 分钟）"
+                : `模型生成中${typeof task.progress === "number" ? ` · ${task.progress}%` : "…"}`}
+            </span>
+            <span>可离开本页，任务进度已本地保存</span>
+          </div>
+        </div>
+      ) : null}
 
       {task?.taskId ? (
         <div className="mt-1.5 text-[11px] text-[var(--muted)]">

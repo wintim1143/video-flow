@@ -8,11 +8,12 @@ import { allImagePrompts, allVideoPrompts, bundleAll, toMarkdown, wholeVideoProm
 import { suggestShotCount } from "@/lib/prompts";
 import type { LlmConfigsResponse, LlmProfileSafe } from "@/lib/llm-types";
 import { useVideoTasks, type CreateVideoPayload } from "@/lib/use-video-tasks";
-import { keyframeSizeFor, useKeyframes } from "@/lib/use-keyframes";
+import { endKeyframePrompt, keyframeSizeFor, useKeyframes } from "@/lib/use-keyframes";
 import { StyleEditor } from "@/components/StyleEditor";
 import { StyleTestImage } from "@/components/StyleTestImage";
 import { Timeline } from "@/components/Timeline";
 import { ShotRow } from "@/components/ShotRow";
+import { ConcatBar, type ConcatResultUi } from "@/components/ConcatBar";
 import { CopyButton } from "@/components/CopyButton";
 import { ProgressModal } from "@/components/ProgressModal";
 
@@ -149,6 +150,9 @@ export default function Page() {
   const [archiving, setArchiving] = useState(false);
   const [archiveResult, setArchiveResult] = useState<ArchiveResult | null>(null);
 
+  /* ── 多镜拼接（M3a）：runId 回传后，归档时把 final.mp4 一起归入同一目录 ── */
+  const [concatResult, setConcatResult] = useState<ConcatResultUi | null>(null);
+
   const [loading, setLoading] = useState<"" | "style" | "shots">("");
   const [error, setError] = useState<ApiError | null>(null);
   /** 当前生成请求的中断控制器（弹窗「取消生成」用） */
@@ -182,16 +186,28 @@ export default function Page() {
     busy: videoBusy,
   } = useVideoTasks();
 
-  /* ── 闸门 2：关键帧（串行队列，逐镜出一张首帧图 → 供 I2V 使用） ── */
+  /* ── 闸门 2：关键帧（串行队列，逐镜出一张首帧图 → 供 I2V 使用；S3 起含尾帧） ── */
   const {
     busy: keyframeBusyMap,
     errors: keyframeErrorMap,
+    endBusy: endKeyframeBusyMap,
+    endErrors: endKeyframeErrorMap,
     pending: keyframePending,
     anyBusy: keyframeAnyBusy,
     generate: generateKeyframe,
+    generateEnd: generateEndFrame,
     generateMany: generateKeyframes,
     clearError: clearKeyframeError,
+    clearEndError: clearEndKeyframeError,
+    reset: resetKeyframes,
   } = useKeyframes();
+
+  /**
+   * 分镜「世代号」：每次重新生成分镜 +1。
+   * 用途：丢弃跨批次的异步回写 —— 关键帧请求在飞行途中用户重分镜，
+   * 旧结果按序号回写会污染新分镜同序号的镜头（index 相同但内容已换代）。
+   */
+  const sbEpochRef = useRef(0);
 
   /* ── 本地持久化：挂载后恢复一次 → 之后每次变更防抖写回 ──
    * 只在 useEffect 里读写，保证 SSR 首屏与客户端首帧一致（不产生 hydration 警告）。 */
@@ -309,6 +325,7 @@ export default function Page() {
     setRefImage(null);
     setSbInputFingerprint("");
     setArchiveResult(null);
+    setConcatResult(null);
     setError(null);
     setProgress({ phase: "", done: 0, total: 0, last: "" });
     clearVideoTasks();
@@ -381,12 +398,15 @@ export default function Page() {
           ? prev.map((s) => (s.index === index ? { ...s, keyframe_attempts: (s.keyframe_attempts ?? 0) + 1 } : s))
           : prev
       );
+      /* 世代号守卫：请求飞行途中若用户重新生成了分镜，这批结果属于旧批次，
+         按序号回写会污染新分镜同序号的镜头 —— 直接丢弃。 */
+      const epoch = sbEpochRef.current;
       const url = await generateKeyframe(index, {
         prompt,
         profileId: imageProfileId || undefined,
         size: kfSize,
       });
-      if (!url) return;
+      if (!url || sbEpochRef.current !== epoch) return;
       setShots((prev) =>
         prev
           ? prev.map((s) => (s.index === index ? { ...s, keyframe_url: url, keyframe_prompt_used: prompt } : s))
@@ -405,44 +425,131 @@ export default function Page() {
     );
   }, [clearKeyframeError]);
 
-  /** 一键补齐缺失的关键帧：串行逐张（避免并发打爆图接口），且只处理**还没有首帧**的镜 ——
-   *  否则「一键」会把已就位的镜全部重烧一遍图配额。想换掉已就位的那张走单镜重出。 */
-  const handleGenerateAllKeyframes = useCallback(async () => {
-    const missing = (shots ?? []).filter((s) => !s.keyframe_url);
-    if (!missing.length) return;
-    /* 发起即计数，与单镜口径一致 */
-    setShots((prev) =>
-      prev
-        ? prev.map((s) =>
-            missing.some((m) => m.index === s.index) ? { ...s, keyframe_attempts: (s.keyframe_attempts ?? 0) + 1 } : s
-          )
-        : prev
-    );
-    const items = missing.map((s) => ({
-      index: s.index,
-      req: {
-        prompt: s.image_prompt || s.video_prompt,
+  /* ── 尾帧（S3 共享端点帧）：end_state 派生 prompt，成功写回 end_keyframe_url。
+     它作本镜视频的 last_frame，同时是下一镜的 first_frame —— 接缝两侧同一张图。 ── */
+  const handleGenerateEndKeyframe = useCallback(
+    async (index: number, prompt: string) => {
+      /* 发起即计数（与首帧口径一致），失败也算，防绕过 R3.2 */
+      setShots((prev) =>
+        prev
+          ? prev.map((s) =>
+              s.index === index ? { ...s, end_keyframe_attempts: (s.end_keyframe_attempts ?? 0) + 1 } : s
+            )
+          : prev
+      );
+      const epoch = sbEpochRef.current;
+      const url = await generateEndFrame(index, {
+        prompt,
         profileId: imageProfileId || undefined,
         size: kfSize,
-      },
-    }));
-    const done = await generateKeyframes(items);
-    if (!done.size) return;
+      });
+      if (!url || sbEpochRef.current !== epoch) return;
+      setShots((prev) =>
+        prev
+          ? prev.map((s) =>
+              s.index === index ? { ...s, end_keyframe_url: url, end_keyframe_prompt_used: prompt } : s
+            )
+          : prev
+      );
+    },
+    [generateEndFrame, imageProfileId, kfSize]
+  );
+
+  const handleClearEndKeyframe = useCallback(
+    (index: number) => {
+      clearEndKeyframeError(index);
+      setShots((prev) =>
+        prev
+          ? prev.map((s) => (s.index === index ? { ...s, end_keyframe_url: "", end_keyframe_prompt_used: "" } : s))
+          : prev
+      );
+    },
+    [clearEndKeyframeError]
+  );
+
+  /** 一键补齐缺失的关键帧（首帧 + 尾帧）：串行逐张（避免并发打爆图接口），且只处理**还没有**的 ——
+   *  否则「一键」会把已就位的全部重烧一遍图配额。想换掉已就位的那张走单镜重出。
+   *  先补首帧再补尾帧（同一条串行队列天然有序），各自写回不同字段。 */
+  const handleGenerateAllKeyframes = useCallback(async () => {
+    const list = shots ?? [];
+    const missingStart = list.filter((s) => !s.keyframe_url);
+    const missingEnd = list.filter((s) => !s.end_keyframe_url);
+    if (!missingStart.length && !missingEnd.length) return;
+    /* 发起即计数，与单镜口径一致（首帧 / 尾帧分开计） */
     setShots((prev) =>
       prev
-        ? prev.map((s) =>
-            done.has(s.index)
-              ? { ...s, keyframe_url: done.get(s.index)!, keyframe_prompt_used: s.image_prompt || s.video_prompt }
-              : s
-          )
+        ? prev.map((s) => ({
+            ...s,
+            keyframe_attempts: missingStart.some((m) => m.index === s.index)
+              ? (s.keyframe_attempts ?? 0) + 1
+              : (s.keyframe_attempts ?? 0),
+            end_keyframe_attempts: missingEnd.some((m) => m.index === s.index)
+              ? (s.end_keyframe_attempts ?? 0) + 1
+              : (s.end_keyframe_attempts ?? 0),
+          }))
         : prev
     );
+    /* 世代号守卫：批量生成耗时长，中途重分镜的话旧批次结果一律丢弃 */
+    const epoch = sbEpochRef.current;
+    if (missingStart.length) {
+      const done = await generateKeyframes(
+        missingStart.map((s) => ({
+          index: s.index,
+          req: {
+            prompt: s.image_prompt || s.video_prompt,
+            profileId: imageProfileId || undefined,
+            size: kfSize,
+          },
+        }))
+      );
+      if (done.size && sbEpochRef.current === epoch) {
+        setShots((prev) =>
+          prev
+            ? prev.map((s) =>
+                done.has(s.index)
+                  ? { ...s, keyframe_url: done.get(s.index)!, keyframe_prompt_used: s.image_prompt || s.video_prompt }
+                  : s
+              )
+            : prev
+        );
+      }
+    }
+    if (missingEnd.length && sbEpochRef.current === epoch) {
+      const doneEnd = await generateKeyframes(
+        missingEnd.map((s) => ({
+          index: s.index,
+          req: {
+            prompt: endKeyframePrompt(s),
+            profileId: imageProfileId || undefined,
+            size: kfSize,
+          },
+        }))
+      );
+      if (doneEnd.size && sbEpochRef.current === epoch) {
+        setShots((prev) =>
+          prev
+            ? prev.map((s) =>
+                doneEnd.has(s.index)
+                  ? {
+                      ...s,
+                      end_keyframe_url: doneEnd.get(s.index)!,
+                      end_keyframe_prompt_used: endKeyframePrompt(s),
+                    }
+                  : s
+              )
+            : prev
+        );
+      }
+    }
   }, [shots, generateKeyframes, imageProfileId, kfSize]);
 
-  /** 已就位的关键帧数量（面板进度用） */
+  /** 已就位的关键帧数量（面板进度用）：首帧 + 尾帧分开统计 */
   const keyframeDone = (shots ?? []).filter((s) => s.keyframe_url).length;
+  const endKeyframeDone = (shots ?? []).filter((s) => s.end_keyframe_url).length;
   /** 还缺几张 —— 批量按钮只补这些，全部就位时按钮转为禁用 */
   const keyframeMissing = (shots ?? []).length - keyframeDone;
+  const endKeyframeMissing = (shots ?? []).length - endKeyframeDone;
+  const batchMissing = keyframeMissing + endKeyframeMissing;
 
   /* ── R1.2：当前输入 vs 这批分镜的来源输入 ──
      不一致 = 结果已过期。这是全流程里最贵的错误：改了 brief 却拿旧分镜继续往下走，
@@ -502,6 +609,8 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          /* 已拼接过 → 复用拼接产物目录，final.mp4 与交付物落同一 runId */
+          runId: concatResult?.runId,
           files: [
             { name: "storyboard.json", content: bundleAll(storyboard, style) },
             { name: "storyboard.md", content: toMarkdown(storyboard, style) },
@@ -524,7 +633,7 @@ export default function Page() {
     } finally {
       setArchiving(false);
     }
-  }, [style, storyboard, videoTasks, outline]);
+  }, [style, storyboard, videoTasks, outline, concatResult]);
 
   async function genStyle(adjust?: string) {
     if (!brief.trim() && !refImage) {
@@ -596,6 +705,15 @@ export default function Page() {
     setShots(null);
     setOutline(null);
     setFailedShots([]);
+    /* 新分镜 = 新的一批镜头。视频任务按镜头序号存（localStorage 独立持久化），
+       不清的话旧序号的任务会嫁接到新镜头上 —— 出现「还没生成却已有视频」的错位。
+       上游还在跑的任务放弃追踪（配额已花，无法退回），但跟着旧分镜一起作废是正确语义。
+       拼接结果与关键帧的 busy/error 状态同理。 */
+    sbEpochRef.current += 1;
+    clearVideoTasks();
+    setVideoError(null);
+    setConcatResult(null);
+    resetKeyframes();
     /* 捕获**发起瞬间**的输入指纹（而不是完成时的）：它才是这批分镜的来源标识（R1.2）。
        不在这里清空已有的指纹 —— 生成失败时旧结果仍对应旧输入，清掉会误报「输入已变更」。 */
     const fpAtStart = fingerprint(brief, aspectRatio, targetDuration, shotCount, refImage?.dataUrl ?? "");
@@ -1261,19 +1379,21 @@ export default function Page() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={keyframeAnyBusy || keyframeMissing === 0}
+                  disabled={keyframeAnyBusy || batchMissing === 0}
                   onClick={() => void handleGenerateAllKeyframes()}
                 >
                   {keyframeAnyBusy
                     ? `生成中… 还有 ${keyframePending} 张`
-                    : keyframeMissing === 0
+                    : batchMissing === 0
                       ? "全部关键帧已就位"
-                      : `一键补齐关键帧（缺 ${keyframeMissing} 镜）`}
+                      : `一键补齐关键帧（首帧缺 ${keyframeMissing} · 尾帧缺 ${endKeyframeMissing}）`}
                 </button>
               </div>
               <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--muted)]">
                 串行逐张生成（并发会被图接口限流）。首帧图会作为 <code className="mono text-[var(--text)]">first_frame</code>{" "}
                 传给视频接口，视频自动切到 <code className="mono text-[var(--text)]">keyframe</code> 模式；未生成首帧的分镜仍可走纯文生视频。
+                尾帧由本镜 end_state 派生，作本镜 <code className="mono text-[var(--text)]">last_frame</code>{" "}
+                并复用为下一镜的首帧 —— 接缝两侧同一张图，跨镜才连续。
               </div>
             </div>
           ) : null}
@@ -1331,6 +1451,16 @@ export default function Page() {
             }
           />
 
+          <ConcatBar
+            shots={storyboard.shots}
+            videoUrls={Object.fromEntries(
+              Object.entries(videoTasks)
+                .filter(([, t]) => t.status === "completed" && t.videoUrl)
+                .map(([i, t]) => [Number(i), t.videoUrl as string])
+            )}
+            onResult={setConcatResult}
+          />
+
           {storyboard.shots.map((s) => (
             <ShotRow
               key={s.index}
@@ -1351,6 +1481,13 @@ export default function Page() {
               onRefreshVideo={() => refreshVideoTask(s.index)}
               onGenerateKeyframe={(prompt) => void handleGenerateKeyframe(s.index, prompt)}
               onClearKeyframe={() => handleClearKeyframe(s.index)}
+              onGenerateEndKeyframe={(prompt) => void handleGenerateEndKeyframe(s.index, prompt)}
+              onClearEndKeyframe={() => handleClearEndKeyframe(s.index)}
+              endKeyframeBusy={endKeyframeBusyMap[s.index] ?? false}
+              endKeyframeError={endKeyframeErrorMap[s.index]}
+              prevEndKeyframeUrl={
+                storyboard.shots.find((p) => p.index === s.index - 1)?.end_keyframe_url || undefined
+              }
             />
           ))}
 

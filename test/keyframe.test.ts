@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ShotSchema, type Shot } from "@/lib/schema";
 import { buildShotVideoPayload } from "@/lib/video-payload";
-import { MAX_KEYFRAME_ATTEMPTS, keyframeSizeFor } from "@/lib/use-keyframes";
+import { MAX_KEYFRAME_ATTEMPTS, endKeyframePrompt, keyframeSizeFor } from "@/lib/use-keyframes";
 import { agnesProvider } from "@/lib/video-providers";
 
 /**
@@ -131,5 +131,86 @@ describe("R3.2 关键帧重出上限", () => {
 
   it("计数原样保留", () => {
     expect(ShotSchema.parse({ index: 1, duration: 5, keyframe_attempts: 2 }).keyframe_attempts).toBe(2);
+  });
+});
+
+describe("S3 共享端点帧：首尾帧优先级", () => {
+  it("上一镜尾帧存在 → firstFrame 用它（接缝优先），本镜首帧被顶掉", () => {
+    const p = buildShotVideoPayload(
+      makeShot({ keyframe_url: "https://cdn.test/kf.png", end_keyframe_url: "https://cdn.test/end.png" }),
+      "9:16",
+      "",
+      "https://cdn.test/prev-end.png"
+    );
+    expect(p.firstFrame).toBe("https://cdn.test/prev-end.png");
+    expect(p.lastFrame).toBe("https://cdn.test/end.png");
+  });
+
+  it("无上一镜尾帧 → 退回本镜关键帧（S0 行为），lastFrame 照带", () => {
+    const p = buildShotVideoPayload(
+      makeShot({ keyframe_url: "https://cdn.test/kf.png", end_keyframe_url: "https://cdn.test/end.png" }),
+      "9:16",
+      ""
+    );
+    expect(p.firstFrame).toBe("https://cdn.test/kf.png");
+    expect(p.lastFrame).toBe("https://cdn.test/end.png");
+  });
+
+  it("只有上一镜尾帧、本镜什么都没有 → firstFrame 仍成立（尾帧链可以独立于首帧工作）", () => {
+    const p = buildShotVideoPayload(makeShot(), "9:16", "", "https://cdn.test/prev-end.png");
+    expect(p.firstFrame).toBe("https://cdn.test/prev-end.png");
+    expect("lastFrame" in p).toBe(false);
+  });
+
+  it("无尾帧 → 不带 lastFrame（空串等同没有）", () => {
+    const p = buildShotVideoPayload(makeShot({ end_keyframe_url: "" }), "9:16", "");
+    expect("lastFrame" in p).toBe(false);
+  });
+
+  it("端到端：上一镜尾帧 + 本镜尾帧 → agnes 产出首尾帧控制的 keyframe 模式", () => {
+    const payload = buildShotVideoPayload(
+      makeShot({ end_keyframe_url: "https://cdn.test/end.png" }),
+      "9:16",
+      "",
+      "https://cdn.test/prev-end.png"
+    );
+    const { body } = agnesProvider.buildCreate(AGNES_PROFILE, payload);
+    expect(body.mode).toBe("keyframe");
+    expect(body.first_frame).toBe("https://cdn.test/prev-end.png");
+    expect(body.last_frame).toBe("https://cdn.test/end.png");
+  });
+});
+
+describe("endKeyframePrompt：尾帧 prompt 派生", () => {
+  it("end_state 为核心 + image_prompt_cn 保持视觉语言", () => {
+    const p = endKeyframePrompt(
+      makeShot({ end_state: "刺客短刃被格挡，剑客收剑", image_prompt_cn: "雨夜竹林，冷峻写实水墨" })
+    );
+    expect(p).toContain("本镜收尾瞬间的定格画面：刺客短刃被格挡，剑客收剑");
+    expect(p).toContain("雨夜竹林，冷峻写实水墨");
+  });
+
+  it("end_state 缺失 → 退回 video_prompt_cn", () => {
+    const p = endKeyframePrompt(makeShot({ end_state: "", video_prompt_cn: "两人对撞" }));
+    expect(p).toContain("两人对撞");
+  });
+
+  it("全部为空 → 空串（按钮会被 prompt 校验拦住）", () => {
+    expect(endKeyframePrompt(makeShot({ end_state: "", video_prompt_cn: "", video_prompt: "", image_prompt_cn: "", image_prompt: "" }))).toBe("");
+  });
+});
+
+describe("S3 schema 字段", () => {
+  it("end_keyframe_url / end_keyframe_attempts 缺省收敛（旧 localStorage 数据兼容）", () => {
+    const s = ShotSchema.parse({ index: 1, duration: 5 });
+    expect(s.end_keyframe_url).toBe("");
+    expect(s.end_keyframe_prompt_used).toBe("");
+    expect(s.end_keyframe_attempts).toBe(0);
+  });
+
+  it("坏值不炸", () => {
+    const s = ShotSchema.parse({ index: 1, duration: 5, end_keyframe_url: null, end_keyframe_attempts: "x" });
+    expect(s.end_keyframe_url).toBe("");
+    expect(s.end_keyframe_attempts).toBe(0);
   });
 });

@@ -83,6 +83,21 @@ export const ShotSchema = z.object({
    * 「清除关键帧」不会重置它（否则一清就绕过了上限）。
    */
   keyframe_attempts: z.number().catch(0),
+  /**
+   * S3 共享端点帧：本镜**收尾帧**的公网 URL（由 end_state 派生的 prompt 生成）。
+   *
+   * 双重身份：作本镜 I2V 的 `last_frame`（把本镜终点钉在设计构图上），
+   * 同时被下一镜复用为它的 `first_frame`（接缝两侧锚定同一张图 —— 跨镜连续性的核心）。
+   * 为空则本镜没有尾帧锚，下一镜退回用自己的首帧关键帧（S0 行为）。
+   */
+  end_keyframe_url: z.string().catch(""),
+  /** 生成尾帧时实际使用的 prompt（留档便于对比重生成，同 keyframe_prompt_used） */
+  end_keyframe_prompt_used: z.string().catch(""),
+  /**
+   * 尾帧的发起次数（含首次与重出）。与首帧的 keyframe_attempts **分开计数**：
+   * 两者是不同的图，各自适用 R3.2 的「首次 + 最多 2 次重出 = 3」上限。
+   */
+  end_keyframe_attempts: z.number().catch(0),
 });
 export type Shot = z.infer<typeof ShotSchema>;
 

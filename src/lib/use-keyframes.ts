@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import type { Shot } from "@/lib/schema";
 
 /**
  * 关键帧生成（M1 闸门 2 —— 「先生关键帧，再图生视频」）。
@@ -48,6 +49,22 @@ export function keyframeSizeFor(aspectRatio: string | undefined): string {
  */
 export const MAX_KEYFRAME_ATTEMPTS = 3;
 
+/**
+ * S3 共享端点帧：本镜**收尾帧**的生图 prompt。
+ *
+ * 收尾画面的权威描述是 `end_state`（大纲层硬性要求镜 N+1 承接它）；场景/主体/画风
+ * 的视觉语言借本镜 image_prompt 保持同一基调。全中文组合 —— Agnes 生图是中文产品，
+ * 且 end_state 本身就是中文，混译反而引入噪声。
+ */
+export function endKeyframePrompt(shot: Shot): string {
+  const state = shot.end_state || shot.video_prompt_cn || shot.video_prompt;
+  const style = shot.image_prompt_cn || shot.image_prompt;
+  const parts: string[] = [];
+  if (state) parts.push(`本镜收尾瞬间的定格画面：${state}`);
+  if (style) parts.push(`场景、主体、光线与画风与以下描述保持一致：${style}`);
+  return parts.join("。");
+}
+
 interface ImageApiData {
   kind: "b64" | "url";
   url?: string;
@@ -58,6 +75,9 @@ interface ImageApiData {
 export function useKeyframes() {
   const [busy, setBusy] = useState<Record<number, boolean>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
+  /* 尾帧（S3 共享端点帧）独立记账：与首帧是不同的图，busy / error / 上限都分开 */
+  const [endBusy, setEndBusy] = useState<Record<number, boolean>>({});
+  const [endErrors, setEndErrors] = useState<Record<number, string>>({});
   const [pending, setPending] = useState(0);
 
   /* 串行队列：把每次生成接到上一条的尾巴上 */
@@ -78,11 +98,38 @@ export function useKeyframes() {
     });
   }, []);
 
-  /** 生成单张关键帧；成功返回公网 URL，失败返回 null（错误已写进 errors） */
+  const clearEndError = useCallback((index: number) => {
+    setEndErrors((prev) => {
+      if (!(index in prev)) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
+  }, []);
+
+  /**
+   * 整体重置：重新生成分镜（换一批镜头）时调用。
+   * busy / errors / pending 都按镜头序号记，跨批次残留会把旧分镜的状态
+   * 嫁接到新分镜同序号的镜头上（与视频任务残留是同一类 bug）。
+   * 已在队列里跑的请求无法取消，其结果由 page 层的世代号守卫负责丢弃。
+   */
+  const reset = useCallback(() => {
+    setBusy({});
+    setErrors({});
+    setEndBusy({});
+    setEndErrors({});
+    setPending(0);
+  }, []);
+
+  /** 生成一张关键帧（首帧或尾帧槽位）；成功返回公网 URL，失败返回 null（错误写进对应 errors） */
   const runOne = useCallback(
-    async (index: number, req: KeyframeRequest): Promise<string | null> => {
-      clearError(index);
-      setBusy((prev) => ({ ...prev, [index]: true }));
+    async (index: number, req: KeyframeRequest, slot: "start" | "end"): Promise<string | null> => {
+      const isEnd = slot === "end";
+      const clearErr = isEnd ? clearEndError : clearError;
+      const setBsy = isEnd ? setEndBusy : setBusy;
+      const setErr = isEnd ? setEndErrors : setErrors;
+      clearErr(index);
+      setBsy((prev) => ({ ...prev, [index]: true }));
       try {
         const res = await fetch("/api/image", {
           method: "POST",
@@ -96,12 +143,12 @@ export function useKeyframes() {
         });
         const json = await res.json();
         if (!json.ok) {
-          setErrors((prev) => ({ ...prev, [index]: json.message ?? "关键帧生成失败" }));
+          setErr((prev) => ({ ...prev, [index]: json.message ?? "关键帧生成失败" }));
           return null;
         }
         const d = json.data as ImageApiData;
         if (!d?.url) {
-          setErrors((prev) => ({
+          setErr((prev) => ({
             ...prev,
             [index]:
               "该图片服务只返回了 base64，没有公网 URL。视频首帧必须是上游能自己拉取的图片地址，请换用会返回 URL 的图片服务（或让该 profile 走支持 url 的网关）。",
@@ -110,24 +157,33 @@ export function useKeyframes() {
         }
         return d.url;
       } catch (e) {
-        setErrors((prev) => ({ ...prev, [index]: `关键帧请求失败：${String(e)}` }));
+        setErr((prev) => ({ ...prev, [index]: `关键帧请求失败：${String(e)}` }));
         return null;
       } finally {
-        setBusy((prev) => {
+        setBsy((prev) => {
           const next = { ...prev };
           delete next[index];
           return next;
         });
       }
     },
-    [clearError]
+    [clearError, clearEndError]
   );
 
-  /** 生成一个分镜的关键帧（进串行队列） */
+  /** 生成一个分镜的首帧关键帧（进串行队列） */
   const generate = useCallback(
     (index: number, req: KeyframeRequest): Promise<string | null> => {
       setPending((n) => n + 1);
-      return enqueue(() => runOne(index, req)).finally(() => setPending((n) => Math.max(0, n - 1)));
+      return enqueue(() => runOne(index, req, "start")).finally(() => setPending((n) => Math.max(0, n - 1)));
+    },
+    [enqueue, runOne]
+  );
+
+  /** 生成一个分镜的尾帧关键帧（同一条串行队列，逐张来） */
+  const generateEnd = useCallback(
+    (index: number, req: KeyframeRequest): Promise<string | null> => {
+      setPending((n) => n + 1);
+      return enqueue(() => runOne(index, req, "end")).finally(() => setPending((n) => Math.max(0, n - 1)));
     },
     [enqueue, runOne]
   );
@@ -148,7 +204,20 @@ export function useKeyframes() {
     [generate]
   );
 
-  const anyBusy = Object.keys(busy).length > 0;
+  const anyBusy = Object.keys(busy).length > 0 || Object.keys(endBusy).length > 0;
 
-  return { busy, errors, pending, anyBusy, generate, generateMany, clearError };
+  return {
+    busy,
+    errors,
+    endBusy,
+    endErrors,
+    pending,
+    anyBusy,
+    generate,
+    generateEnd,
+    generateMany,
+    clearError,
+    clearEndError,
+    reset,
+  };
 }

@@ -123,19 +123,22 @@ function BeatsBlock({
     else onBeatsCn(next);
   };
   return (
-    <div className="mb-3">
-      <div className="mb-1 flex items-center justify-between">
+    <details className="mb-3 rounded-md border border-[var(--border)] bg-[var(--panel-2)]">
+      <summary className="flex cursor-pointer select-none items-center justify-between px-3 py-2">
         <span className="text-[12px] font-medium" style={{ color: "var(--accent-2)" }}>
-          秒级节拍 · Beats
+          秒级节拍 · Beats（{list.length} 条）
         </span>
-        <CopyButton text={list.join("\n")} label="复制" />
-      </div>
-      <div className="space-y-1">
+        <span className="text-[11px] text-[var(--muted)]">点开编辑</span>
+      </summary>
+      <div className="space-y-1 px-3 pb-3">
+        <div className="flex justify-end">
+          <CopyButton text={list.join("\n")} label="复制全部" />
+        </div>
         {list.map((b, i) => (
           <EditableText key={i} value={b} onCommit={(v) => update(i, v)} mono placeholder={`节拍 ${i + 1}`} />
         ))}
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -157,6 +160,11 @@ export function ShotRow({
   onRefreshVideo,
   onGenerateKeyframe,
   onClearKeyframe,
+  onGenerateEndKeyframe,
+  onClearEndKeyframe,
+  endKeyframeBusy,
+  endKeyframeError,
+  prevEndKeyframeUrl,
 }: {
   shot: Shot;
   /** 画幅（来自分镜 meta），复制视频 prompt 时作为前置说明 */
@@ -180,6 +188,13 @@ export function ShotRow({
   onRefreshVideo?: () => void;
   onGenerateKeyframe?: (prompt: string) => void;
   onClearKeyframe?: () => void;
+  /** 尾帧（S3 共享端点帧）：独立 busy / error，与首帧互不干扰 */
+  onGenerateEndKeyframe?: (prompt: string) => void;
+  onClearEndKeyframe?: () => void;
+  endKeyframeBusy?: boolean;
+  endKeyframeError?: string;
+  /** 上一镜的收尾帧 URL：存在时作为本镜视频的 first_frame（接缝连续） */
+  prevEndKeyframeUrl?: string;
 }) {
   const [lang, setLang] = useState<Lang>("en");
   const negEn = [globalNegative, shot.negative_prompt].filter(Boolean).join(", ");
@@ -215,16 +230,43 @@ export function ShotRow({
       ) : null}
 
       <div className="grid gap-5 p-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-        {/* 左栏：中文分镜卡（可编辑文案字段） */}
+        {/* 左栏：分镜元信息 + 负面词 + 节拍（与右栏的 prompt/生成动作平衡） */}
         <div className="space-y-1.5">
           <MetaLine label="场景" value={shot.scene} />
           <MetaLine label="主体" value={shot.subject} />
           <MetaLine label="动作" value={shot.action} />
           <MetaLine label="口播" value={shot.voiceover} />
           <MetaLine label="音频" value={shot.audio} />
+          <div className="pt-2">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[12px] text-[var(--muted)]">Negative Prompt</span>
+              <CopyButton text={lang === "en" ? negEn : negCn || negEn} label="复制" />
+            </div>
+            {lang === "en" ? (
+              <EditableText
+                value={negEn}
+                onCommit={(v) => patchField(shot, "negative_prompt", v, onShot)}
+                mono
+                placeholder="negative prompt"
+              />
+            ) : (
+              <EditableText
+                value={negCn}
+                onCommit={(v) => patchField(shot, "negative_prompt_cn", v, onShot)}
+                placeholder="负面词（中文对照）"
+              />
+            )}
+          </div>
+          <BeatsBlock
+            beats={shot.beats ?? []}
+            beatsCn={shot.beats_cn ?? []}
+            lang={lang}
+            onBeats={(next) => patchList(shot, "beats", next, onShot)}
+            onBeatsCn={(next) => patchList(shot, "beats_cn", next, onShot)}
+          />
         </div>
 
-        {/* 右栏：双语可编辑 prompt */}
+        {/* 右栏：双语 prompt + 关键帧/视频生成动作 */}
         <div>
           <BilingualPrompt
             label="Image Prompt · 首帧生图"
@@ -249,33 +291,6 @@ export function ShotRow({
                 : undefined
             }
           />
-          <BeatsBlock
-            beats={shot.beats ?? []}
-            beatsCn={shot.beats_cn ?? []}
-            lang={lang}
-            onBeats={(next) => patchList(shot, "beats", next, onShot)}
-            onBeatsCn={(next) => patchList(shot, "beats_cn", next, onShot)}
-          />
-          <div>
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-[12px] text-[var(--muted)]">Negative Prompt</span>
-              <CopyButton text={lang === "en" ? negEn : negCn || negEn} label="复制" />
-            </div>
-            {lang === "en" ? (
-              <EditableText
-                value={negEn}
-                onCommit={(v) => patchField(shot, "negative_prompt", v, onShot)}
-                mono
-                placeholder="negative prompt"
-              />
-            ) : (
-              <EditableText
-                value={negCn}
-                onCommit={(v) => patchField(shot, "negative_prompt_cn", v, onShot)}
-                placeholder="负面词（中文对照）"
-              />
-            )}
-          </div>
           <KeyframeBar
             shot={shot}
             aspectRatio={aspectRatio}
@@ -284,6 +299,10 @@ export function ShotRow({
             error={keyframeError}
             onGenerate={(prompt) => onGenerateKeyframe?.(prompt)}
             onClear={() => onClearKeyframe?.()}
+            endBusy={endKeyframeBusy ?? false}
+            endError={endKeyframeError}
+            onGenerateEnd={(prompt) => onGenerateEndKeyframe?.(prompt)}
+            onClearEnd={() => onClearEndKeyframe?.()}
           />
           <VideoGenBar
             shot={shot}
@@ -293,6 +312,7 @@ export function ShotRow({
             enabled={videoEnabled}
             disabled={videoBusy}
             createReadyAt={videoCreateReadyAt}
+            prevEndKeyframeUrl={prevEndKeyframeUrl}
             onCreate={(payload) => onCreateVideo?.(payload)}
             onRemove={() => onRemoveVideo?.()}
             onRefresh={() => onRefreshVideo?.()}
